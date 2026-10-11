@@ -1,11 +1,13 @@
 # Exam Duty Allocator
 
-A minimalist exam-duty scheduler with two workflows:
+A minimalist exam-duty scheduler with username/password access:
 
-- **One-time schedule:** create, review, and export without an account.
-- **School workspace:** verified email accounts, admin invitations, school-private duty history, and history-aware fair allocation.
+- **Simple sign-in:** create one username and password; no email, verification, invitations, or reset links.
+- **Duty history:** each username has a private history used to balance future exam assignments.
 
-Schedules are not automatically marked complete. A school member explicitly saves an exam’s duty counts to the school history after review. Future allocation favors the available teachers with the lowest saved total; ties are randomized. Users can exchange assignments and standby staff only when the exchange does not worsen the overall cumulative duty spread.
+Schedules are not automatically marked complete. A signed-in user explicitly saves an exam’s duty counts to their history after review. Future allocation favors the available teachers with the lowest saved total; ties are randomized. Users can exchange assignments and standby staff only when the exchange does not worsen the overall cumulative duty spread.
+
+If you forget your username or password, create a new account with a different username. There is no recovery flow, and the old account’s history cannot be recovered or transferred automatically. To let multiple people use the same history, they must use the same username and password.
 
 ## Compact project structure
 
@@ -39,21 +41,20 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:5173`. Local development uses SQLite for convenience. School account email actions require Resend or SMTP settings. Run backend tests from `backend` with `python -m unittest discover -s tests`.
+Open `http://localhost:5173`. Local development uses SQLite for convenience. Run backend tests from `backend` with `python -m unittest discover -s tests`.
 
-## Free pilot deployment (Render + Supabase + Resend)
+## Free pilot deployment (Render + Supabase)
 
-The default [`render.yaml`](./render.yaml) configures a **free pilot**: one Render Free FastAPI+frontend service, Supabase Free PostgreSQL, and Resend Free for account emails. The root Dockerfile serves the UI and API from the same HTTPS origin.
+The default [`render.yaml`](./render.yaml) configures a **free pilot**: one Render Free FastAPI+frontend service and Supabase Free PostgreSQL. The root Dockerfile serves the UI and API from the same HTTPS origin.
 
 1. Create a Supabase Free project and copy its **Session pooler** PostgreSQL connection string from **Connect** (Render uses IPv4). Keep the password private and preserve any SSL query parameters.
-2. Verify a sender domain in Resend and create an API key. Resend Free currently allows 3,000 emails/month, capped at 100/day; the sender address must use a verified domain.
-3. In Render, create a **Blueprint** from this GitHub repository. Choose the root `render.yaml`; it builds the app and generates `APP_SECRET_KEY`.
-4. When prompted, enter the Supabase `DATABASE_URL`, Resend `RESEND_API_KEY`, and verified `EMAIL_FROM` in Render’s private environment-variable form. Never put these secrets in Git or chat.
-5. Wait for `/health` to pass, then share the generated `https://...onrender.com` URL.
+2. In Render, create a **Blueprint** from this GitHub repository. Choose the root `render.yaml`; it builds the app and generates `APP_SECRET_KEY`.
+3. When prompted, enter the Supabase `DATABASE_URL` in Render’s private environment-variable form. Never put secrets in Git or chat.
+4. Wait for `/health` to pass, then share the generated `https://...onrender.com` URL.
 
 Render’s free web service sleeps after 15 minutes without traffic, so the first visit after idle may take about a minute. Supabase Free includes a 500 MB database and can pause projects after a week of inactivity; resume it in Supabase if needed. These free tiers are useful for a pilot, not an uptime or backup guarantee. Monitor each provider’s quotas and terms.
 
-The public Render URL is automatically used for verification, invitation, and password-reset links. Teacher totals and exam logs are scoped to each authenticated school. One-time visitors do not store data.
+Teacher totals and exam logs are scoped to each username. Accounts and passwords are stored in the persistent database; passwords are hashed. Username and password recovery are intentionally not available.
 
 Account and workbook-import routes have per-IP limits. The default in-memory limiter is suitable for a single app process; configure `RATE_LIMIT_STORAGE_URI` to a shared Redis store before running multiple replicas.
 
@@ -63,7 +64,7 @@ Account and workbook-import routes have per-IP limits. The default in-memory lim
 
 ### Local Docker Compose
 
-For local self-hosting, copy `.env.example` to `.env` and configure `APP_SECRET_KEY`, `POSTGRES_PASSWORD`, and either Resend API settings or SMTP settings, then run:
+For local self-hosting, copy `.env.example` to `.env` and configure `APP_SECRET_KEY` and `POSTGRES_PASSWORD`, then run:
 
 ```powershell
 docker compose up --build

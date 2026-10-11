@@ -13,9 +13,5 @@ services:
         generateValue: true
       - key: DATABASE_URL
         sync: false
-      - key: RESEND_API_KEY
-        sync: false
-      - key: EMAIL_FROM
-        sync: false
       - key: RATE_LIMIT_STORAGE_URI
         value: memory://

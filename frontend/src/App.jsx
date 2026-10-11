@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { saveAs } from 'file-saver';
-import { ArrowDownToLine, CalendarDays, History, LogOut, MailPlus, ShieldCheck, Upload } from 'lucide-react';
+import { ArrowDownToLine, CalendarDays, History, LogOut, Upload } from 'lucide-react';
 import Navbar from './components/Navbar';
 import DataEntryForm from './components/DataEntryForm';
 import Dashboard from './components/Dashboard';
@@ -21,53 +21,14 @@ async function request(path, options = {}, token = '') {
   return body;
 }
 
-function allocateLocally(formData) {
-  const teachers = [...new Set(formData.teachers.map((name) => name.trim()).filter(Boolean))];
-  const rooms = [...new Set(formData.rooms.map((name) => name.trim()).filter(Boolean))];
-  if (rooms.length > teachers.length) throw new Error('Each shift needs at least as many teachers as rooms.');
-  const counts = Object.fromEntries(teachers.map((teacher) => [teacher, 0]));
-  const schedule = formData.sessions.map((session, index) => {
-    const used = new Set();
-    const assignments = rooms.map((room) => {
-      const choices = teachers.filter((teacher) => !used.has(teacher));
-      const minimum = Math.min(...choices.map((teacher) => counts[teacher]));
-      const tied = choices.filter((teacher) => counts[teacher] === minimum);
-      const teacher = tied[Math.floor(Math.random() * tied.length)];
-      used.add(teacher);
-      counts[teacher] += 1;
-      return { room, teacher };
-    });
-    return {
-      session_id: session.id || `session_${index + 1}`,
-      date: session.date,
-      time_slot: session.time_slot,
-      session_name: session.session_name || `Session ${index + 1}`,
-      assignments
-    };
-  });
-  const assigned = new Set(schedule.flatMap((session) => session.assignments.map((assignment) => assignment.teacher)));
-  return {
-    school_name: formData.school_name,
-    exam_name: formData.exam_name,
-    schedule,
-    fairness_matrix: teachers.map((teacher) => ({ teacher, total_duties: counts[teacher] })),
-    total_teachers: teachers.length,
-    total_rooms: rooms.length,
-    total_shifts: rooms.length * schedule.length,
-    standby_teachers: teachers.filter((teacher) => !assigned.has(teacher)),
-    history_totals: Object.fromEntries(teachers.map((teacher) => [teacher, 0]))
-  };
-}
-
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) || '');
   const [account, setAccount] = useState(null);
-  const [mode, setMode] = useState('home');
+  const [mode, setMode] = useState('auth');
+  const [authReady, setAuthReady] = useState(false);
   const [authMode, setAuthMode] = useState('login');
-  const [schoolName, setSchoolName] = useState('');
-  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [accountMessage, setAccountMessage] = useState('');
   const [error, setError] = useState('');
   const [allocationData, setAllocationData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -76,83 +37,40 @@ export default function App() {
   const [history, setHistory] = useState({});
   const [historyMessage, setHistoryMessage] = useState('');
   const [historyBusy, setHistoryBusy] = useState(false);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [linkToken, setLinkToken] = useState('');
-
-  useEffect(() => {
-    const query = new URLSearchParams(window.location.search);
-    const verifyToken = query.get('verify_token');
-    const inviteToken = query.get('invite_token');
-    const resetToken = query.get('reset_token');
-    if (verifyToken) {
-      setMode('workspace');
-      setAuthMode('login');
-      request('/auth/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: verifyToken }) })
-        .then((result) => setAccountMessage(result.message))
-        .catch((cause) => setError(cause.message));
-      window.history.replaceState({}, '', window.location.pathname);
-    } else if (inviteToken || resetToken) {
-      setLinkToken(inviteToken || resetToken);
-      setMode('workspace');
-      setAuthMode(inviteToken ? 'invite' : 'reset');
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-  }, []);
 
   useEffect(() => {
     if (!token) {
       setAccount(null);
+      setAuthReady(true);
       return;
     }
     request('/auth/me', {}, token)
-      .then((result) => setAccount(result))
+      .then((result) => {
+        setAccount(result);
+        setMode('home');
+      })
       .catch(() => {
         localStorage.removeItem(TOKEN_KEY);
         setToken('');
-      });
+        setMode('auth');
+      })
+      .finally(() => setAuthReady(true));
   }, [token]);
 
   const handleAccountAction = async (event) => {
     event.preventDefault();
     setError('');
-    setAccountMessage('');
     try {
-      if (authMode === 'register') {
-        const result = await request('/auth/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ school_name: schoolName, email, password })
-        });
-        setAccountMessage(result.message);
-      } else if (authMode === 'invite' || authMode === 'reset') {
-        const path = authMode === 'invite' ? '/auth/invite/accept' : '/auth/password-reset/confirm';
-        const result = await request(path, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: linkToken, password })
-        });
-        setAccountMessage(result.message);
-        setAuthMode('login');
-        setLinkToken('');
-      } else if (authMode === 'forgot') {
-        const result = await request('/auth/password-reset', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email })
-        });
-        setAccountMessage(result.message);
-      } else {
-        const result = await request('/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password })
-        });
-        localStorage.setItem(TOKEN_KEY, result.access_token);
-        setToken(result.access_token);
-        setAccount({ email: result.email, role: result.role, school_name: result.school_name });
-        setMode('home');
-        setPassword('');
-      }
+      const result = await request(`/auth/${authMode === 'register' ? 'register' : 'login'}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username.trim(), password })
+      });
+      localStorage.setItem(TOKEN_KEY, result.access_token);
+      setToken(result.access_token);
+      setAccount({ username: result.username, role: result.role, school_name: result.school_name });
+      setMode('home');
+      setPassword('');
     } catch (cause) {
       setError(cause.message);
     }
@@ -162,7 +80,7 @@ export default function App() {
     localStorage.removeItem(TOKEN_KEY);
     setToken('');
     setAccount(null);
-    setMode('home');
+    setMode('auth');
     setHistory({});
     setAllocationData(null);
   };
@@ -209,23 +127,6 @@ export default function App() {
     }
   };
 
-  const sendInvite = async (event) => {
-    event.preventDefault();
-    setError('');
-    setHistoryMessage('');
-    try {
-      const result = await request('/auth/invite', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: inviteEmail })
-      }, token);
-      setHistoryMessage(result.message);
-      setInviteEmail('');
-    } catch (cause) {
-      setError(cause.message);
-    }
-  };
-
   const handleGenerateAllocation = async (formData) => {
     setLoading(true);
     setError('');
@@ -234,19 +135,10 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
-      }, mode === 'workspace' ? token : '');
-      setAllocationData({ ...data, exam_id: crypto.randomUUID(), workspace: mode === 'workspace' });
+      }, token);
+      setAllocationData({ ...data, exam_id: crypto.randomUUID(), workspace: true });
     } catch (cause) {
-      if (mode === 'workspace') {
-        setError(cause.message);
-      } else {
-        try {
-          setAllocationData({ ...allocateLocally(formData), exam_id: crypto.randomUUID(), workspace: false });
-          setError('Backend unavailable; generated this one-time schedule in your browser.');
-        } catch (fallbackError) {
-          setError(`Could not generate the schedule: ${fallbackError.message}`);
-        }
-      }
+      setError(cause.message);
     } finally {
       setLoading(false);
     }
@@ -306,7 +198,19 @@ export default function App() {
       <Navbar onReset={() => { setAllocationData(null); setMode('home'); }} hasData={!!allocationData} />
       {error && <div role="alert" className="mx-auto mt-4 w-full max-w-5xl rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}<button className="float-right font-semibold" onClick={() => setError('')}>Dismiss</button></div>}
       <main className="flex-1">
-        {allocationData ? (
+        {!authReady ? (
+          <p className="mx-auto max-w-md px-4 py-16 text-center text-sm text-slate-600">Loading your workspace…</p>
+        ) : !account ? (
+          <AccountPanel
+            authMode={authMode}
+            setAuthMode={setAuthMode}
+            username={username}
+            setUsername={setUsername}
+            password={password}
+            setPassword={setPassword}
+            onSubmit={handleAccountAction}
+          />
+        ) : allocationData ? (
           <Dashboard
             data={allocationData}
             onUpdateSchedule={setAllocationData}
@@ -317,99 +221,66 @@ export default function App() {
             historySaved={allocationData.history_saved}
             onSaveExam={handleSaveExam}
           />
-        ) : mode === 'history' && account ? (
+        ) : mode === 'history' ? (
           <HistoryView history={history} busy={historyBusy} message={historyMessage} onImport={importHistory} onExport={downloadHistory} onBack={() => setMode('home')} />
-        ) : mode === 'workspace' && !account ? (
-          <AccountPanel
-            authMode={authMode}
-            setAuthMode={setAuthMode}
-            schoolName={schoolName}
-            setSchoolName={setSchoolName}
-            email={email}
-            setEmail={setEmail}
-            password={password}
-            setPassword={setPassword}
-            message={accountMessage}
-            onSubmit={handleAccountAction}
-            onBack={() => { setMode('home'); setError(''); }}
-          />
-        ) : mode === 'invite' && account?.role === 'admin' ? (
-          <section className="mx-auto max-w-xl px-4 py-8">
-            <div className="glass-panel p-6">
-              <button onClick={() => setMode('home')} className="mb-4 text-sm text-slate-600">← Back</button>
-              <h1 className="text-xl font-semibold">Invite staff</h1>
-              <p className="my-2 text-sm text-slate-600">They’ll join {account.school_name}’s private duty-history workspace.</p>
-              <form onSubmit={sendInvite} className="mt-4 flex gap-2">
-                <input className="glass-input min-w-0 flex-1 px-3 py-2" type="email" required value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="staff@school.edu" />
-                <button className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white">Send invite</button>
-              </form>
-              {historyMessage && <p className="mt-3 text-sm text-emerald-800">{historyMessage}</p>}
-            </div>
-          </section>
-        ) : mode === 'workspace' || mode === 'one-time' ? (
+        ) : mode === 'workspace' ? (
           <DataEntryForm onSubmit={handleGenerateAllocation} loading={loading} />
         ) : (
-          <HomeScreen account={account} onChoose={setMode} onOpenHistory={openHistory} onLogout={handleLogout} onInvite={() => setMode('invite')} />
+          <HomeScreen account={account} onChoose={setMode} onOpenHistory={openHistory} onLogout={handleLogout} />
         )}
       </main>
-      <footer className="border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-500">Exam Duty Allocator · School-private duty history</footer>
+      <footer className="border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-500">Exam Duty Allocator · Duty history stays with your username</footer>
     </div>
   );
 }
 
-function HomeScreen({ account, onChoose, onOpenHistory, onLogout, onInvite }) {
+function HomeScreen({ account, onChoose, onOpenHistory, onLogout }) {
   return (
     <section className="mx-auto max-w-5xl px-4 py-12 sm:py-16">
       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-800">Exam Duty Allocator</p>
       <div className="mt-3 flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">Plan duties with continuity.</h1>
-          <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-600">Generate a one-time chart or balance the next exam against your school’s past assignments.</p>
+          <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-600">Create a duty chart and keep your past exam assignments together in one private workspace.</p>
         </div>
-        {account && <div className="flex items-center gap-3 text-sm text-slate-600"><span>{account.school_name} · {account.email}</span><button onClick={onLogout} title="Sign out" className="rounded border border-slate-300 p-2"><LogOut size={16} /></button></div>}
+        <div className="flex items-center gap-3 text-sm text-slate-600"><span>{account.username}</span><button onClick={onLogout} title="Sign out" className="rounded border border-slate-300 p-2"><LogOut size={16} /></button></div>
       </div>
       <div className="mt-10 grid gap-4 md:grid-cols-2">
-        <button onClick={() => onChoose('one-time')} className="glass-panel group p-6 text-left transition hover:border-emerald-600">
-          <CalendarDays className="text-emerald-800" size={22} />
-          <h2 className="mt-5 text-lg font-semibold text-slate-900">One-time schedule</h2>
-          <p className="mt-2 text-sm leading-6 text-slate-600">Create, review, and export a chart without account setup or saved history.</p>
-          <span className="mt-5 inline-block text-sm font-medium text-emerald-800">Start a schedule →</span>
-        </button>
         <button onClick={() => onChoose('workspace')} className="glass-panel group p-6 text-left transition hover:border-emerald-600">
-          <ShieldCheck className="text-emerald-800" size={22} />
-          <h2 className="mt-5 text-lg font-semibold text-slate-900">School workspace</h2>
-          <p className="mt-2 text-sm leading-6 text-slate-600">Use private school accounts and past exam totals to keep assignments balanced over time.</p>
-          <span className="mt-5 inline-block text-sm font-medium text-emerald-800">{account ? 'Generate with history →' : 'Sign in or register →'}</span>
+          <CalendarDays className="text-emerald-800" size={22} />
+          <h2 className="mt-5 text-lg font-semibold text-slate-900">Create a duty schedule</h2>
+          <p className="mt-2 text-sm leading-6 text-slate-600">Generate, review, and download your exam duty chart.</p>
+          <span className="mt-5 inline-block text-sm font-medium text-emerald-800">Start scheduling →</span>
+        </button>
+        <button onClick={onOpenHistory} className="glass-panel group p-6 text-left transition hover:border-emerald-600">
+          <History className="text-emerald-800" size={22} />
+          <h2 className="mt-5 text-lg font-semibold text-slate-900">Past-duty history</h2>
+          <p className="mt-2 text-sm leading-6 text-slate-600">Import, review, or download this username’s saved teacher totals.</p>
+          <span className="mt-5 inline-block text-sm font-medium text-emerald-800">View history →</span>
         </button>
       </div>
-      {account && <div className="mt-5 grid gap-3 sm:grid-cols-2">
-        <button onClick={onOpenHistory} className="glass-panel flex items-center gap-3 p-4 text-left text-sm font-medium text-slate-800"><History className="text-emerald-800" size={18} />Manage past-duty history</button>
-        {account.role === 'admin' && <button onClick={onInvite} className="glass-panel flex items-center gap-3 p-4 text-left text-sm font-medium text-slate-800"><MailPlus className="text-emerald-800" size={18} />Invite school staff</button>}
-      </div>}
+      <p className="mt-5 text-sm text-slate-500">Forgot your username or password? Create a new account with a different username. Your old history cannot be recovered.</p>
     </section>
   );
 }
 
-function AccountPanel({ authMode, setAuthMode, schoolName, setSchoolName, email, setEmail, password, setPassword, message, onSubmit, onBack }) {
-  const needsPassword = !['forgot'].includes(authMode);
-  const title = { login: 'Sign in to your school', register: 'Create a school workspace', invite: 'Join your school workspace', reset: 'Choose a new password', forgot: 'Reset your password' }[authMode];
+function AccountPanel({ authMode, setAuthMode, username, setUsername, password, setPassword, onSubmit }) {
+  const isRegistering = authMode === 'register';
   return (
     <section className="mx-auto max-w-md px-4 py-10">
       <div className="glass-panel p-6 sm:p-8">
-        <button onClick={onBack} className="mb-5 text-sm text-slate-600">← Back</button>
-        <h1 className="text-2xl font-semibold text-slate-900">{title}</h1>
-        <p className="mt-2 text-sm text-slate-600">School schedules and duty history are visible only to members of that school.</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-800">Exam Duty Allocator</p>
+        <h1 className="mt-3 text-2xl font-semibold text-slate-900">{isRegistering ? 'Create your account' : 'Sign in to schedule'}</h1>
+        <p className="mt-2 text-sm text-slate-600">Use a username and password. No email or verification step is needed. To share history, teammates use the same login.</p>
         <form onSubmit={onSubmit} className="mt-6 space-y-4">
-          {authMode === 'register' && <label className="block text-sm text-slate-700">School name<input required minLength={2} className="glass-input mt-1 block w-full px-3 py-2" value={schoolName} onChange={(event) => setSchoolName(event.target.value)} /></label>}
-          {authMode !== 'invite' && authMode !== 'reset' && <label className="block text-sm text-slate-700">School email<input required type="email" className="glass-input mt-1 block w-full px-3 py-2" value={email} onChange={(event) => setEmail(event.target.value)} /></label>}
-          {needsPassword && <label className="block text-sm text-slate-700">Password<input required type="password" minLength={authMode === 'login' ? 1 : 12} autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} className="glass-input mt-1 block w-full px-3 py-2" value={password} onChange={(event) => setPassword(event.target.value)} />{authMode !== 'login' && <span className="mt-1 block text-xs text-slate-500">Use at least 12 characters.</span>}</label>}
-          <button className="w-full rounded-md bg-emerald-800 px-4 py-2.5 text-sm font-medium text-white">{authMode === 'login' ? 'Sign in' : authMode === 'register' ? 'Create account and verify email' : authMode === 'forgot' ? 'Email reset link' : 'Continue'}</button>
+          <label className="block text-sm text-slate-700">Username<input required minLength={3} maxLength={32} pattern="[A-Za-z0-9_.-]+" autoComplete="username" className="glass-input mt-1 block w-full px-3 py-2" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
+          <label className="block text-sm text-slate-700">Password<input required type="password" minLength={isRegistering ? 12 : 1} maxLength={256} autoComplete={isRegistering ? 'new-password' : 'current-password'} className="glass-input mt-1 block w-full px-3 py-2" value={password} onChange={(event) => setPassword(event.target.value)} />{isRegistering && <span className="mt-1 block text-xs text-slate-500">Use at least 12 characters.</span>}</label>
+          <button className="w-full rounded-md bg-emerald-800 px-4 py-2.5 text-sm font-medium text-white">{isRegistering ? 'Create account' : 'Sign in'}</button>
         </form>
-        {message && <p role="status" className="mt-4 rounded-md bg-emerald-50 p-3 text-sm text-emerald-900">{message}</p>}
-        {['login', 'register'].includes(authMode) && <div className="mt-5 flex justify-between text-sm">
-          {authMode === 'login' ? <><button onClick={() => setAuthMode('register')} className="text-emerald-800">Register a school</button><button onClick={() => setAuthMode('forgot')} className="text-slate-600">Forgot password?</button></> : <button onClick={() => setAuthMode('login')} className="text-emerald-800">Already registered? Sign in</button>}
-        </div>}
-        {authMode === 'forgot' && <button onClick={() => setAuthMode('login')} className="mt-4 text-sm text-emerald-800">Return to sign in</button>}
+        <button onClick={() => setAuthMode(isRegistering ? 'login' : 'register')} className="mt-5 text-sm font-medium text-emerald-800">
+          {isRegistering ? 'Already have an account? Sign in' : 'New here? Create an account'}
+        </button>
+        {!isRegistering && <p className="mt-4 text-xs leading-5 text-slate-500">Forgot your login? Create a new account with a different username. Past history stays with the old account.</p>}
       </div>
     </section>
   );

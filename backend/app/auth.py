@@ -1,14 +1,9 @@
 import os
 import hashlib
 import io
-import json
-import secrets
-import smtplib
+import re
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 from typing import Annotated
-from urllib.error import HTTPError, URLError
-from urllib.request import Request as UrlRequest, urlopen
 
 import jwt
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile, status
@@ -16,28 +11,22 @@ from pydantic import BaseModel, Field
 from pwdlib import PasswordHash
 from openpyxl import Workbook, load_workbook
 from fastapi.responses import StreamingResponse
-from sqlalchemy import ForeignKey, String, UniqueConstraint, select
+from sqlalchemy import ForeignKey, String, UniqueConstraint, inspect, select, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, Mapped, mapped_column
 
 from .database import Base, SessionLocal
 from .rate_limit import limiter
 
-router = APIRouter(prefix="/auth", tags=["school accounts"])
+router = APIRouter(prefix="/auth", tags=["accounts"])
 password_hash = PasswordHash.recommended()
 SECRET_KEY = os.getenv("APP_SECRET_KEY", "local-development-key-change-before-deploy")
-FRONTEND_URL = os.getenv(
-    "FRONTEND_URL",
-    os.getenv("RENDER_EXTERNAL_URL", "http://localhost:5173"),
-).rstrip("/")
 if os.getenv("APP_ENV") == "production":
     if SECRET_KEY == "local-development-key-change-before-deploy":
         raise RuntimeError("Set APP_SECRET_KEY to a unique secret before production.")
     if not os.getenv("DATABASE_URL", "").startswith(("postgres://", "postgresql://", "postgresql+psycopg://")):
         raise RuntimeError("Production requires a persistent PostgreSQL DATABASE_URL.")
-    has_resend = bool(os.getenv("RESEND_API_KEY") and (os.getenv("EMAIL_FROM") or os.getenv("SMTP_FROM")))
-    has_smtp = bool(os.getenv("SMTP_HOST") and (os.getenv("SMTP_FROM") or os.getenv("EMAIL_FROM")))
-    if not (has_resend or has_smtp):
-        raise RuntimeError("Production requires Resend API credentials or SMTP credentials for account email.")
 
 
 class School(Base):
@@ -50,20 +39,13 @@ class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(primary_key=True)
     school_id: Mapped[int] = mapped_column(ForeignKey("schools.id", ondelete="CASCADE"), index=True)
+    username: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    # Kept for compatibility with existing databases; new accounts do not use email.
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(500))
     role: Mapped[str] = mapped_column(String(20), default="staff")
-    verified: Mapped[bool] = mapped_column(default=False)
-
-
-class Invitation(Base):
-    __tablename__ = "invitations"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    school_id: Mapped[int] = mapped_column(ForeignKey("schools.id", ondelete="CASCADE"), index=True)
-    email: Mapped[str] = mapped_column(String(320), index=True)
-    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
-    expires_at: Mapped[datetime]
-    accepted: Mapped[bool] = mapped_column(default=False)
+    # Retained for compatibility with the existing users table.
+    verified: Mapped[bool] = mapped_column(default=True)
 
 
 class DutyHistory(Base):
@@ -102,40 +84,14 @@ class DutyImport(Base):
     content_hash: Mapped[str] = mapped_column(String(64))
 
 
-class PasswordResetToken(Base):
-    __tablename__ = "password_reset_tokens"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    email: Mapped[str] = mapped_column(String(320), index=True)
-    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
-    expires_at: Mapped[datetime]
-    consumed: Mapped[bool] = mapped_column(default=False)
-
-
 class Registration(BaseModel):
-    school_name: str = Field(min_length=2, max_length=200)
-    email: str = Field(min_length=5, max_length=320)
+    username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
     password: str = Field(min_length=12, max_length=256)
 
 
 class Credentials(BaseModel):
-    email: str
+    username: str
     password: str = Field(min_length=1, max_length=256)
-
-
-class TokenInput(BaseModel):
-    token: str
-
-
-class PasswordResetInput(TokenInput):
-    password: str = Field(min_length=12, max_length=256)
-
-
-class PasswordResetRequest(BaseModel):
-    email: str
-
-
-class InviteRequest(BaseModel):
-    email: str
 
 
 class HistoryRecord(BaseModel):
@@ -152,11 +108,46 @@ def get_db():
         db.close()
 
 
-def normalized_email(value: str) -> str:
-    email = value.strip().lower()
-    if email.count("@") != 1 or "." not in email.rsplit("@", 1)[-1]:
-        raise HTTPException(status_code=422, detail="Enter a valid email address.")
-    return email
+def normalized_username(value: str) -> str:
+    username = value.strip().lower()
+    if not re.fullmatch(r"[a-z0-9_.-]{3,32}", username):
+        raise HTTPException(
+            status_code=422,
+            detail="Username must be 3-32 characters using letters, numbers, dots, underscores, or hyphens.",
+        )
+    return username
+
+
+def migrate_legacy_usernames(engine: Engine) -> None:
+    columns = {column["name"] for column in inspect(engine).get_columns("users")}
+    with engine.begin() as connection:
+        if "username" not in columns:
+            connection.execute(text("ALTER TABLE users ADD COLUMN username VARCHAR(32)"))
+        usernames = set(connection.execute(
+            text("SELECT username FROM users WHERE username IS NOT NULL")
+        ).scalars())
+        legacy_users = connection.execute(
+            text("SELECT id, email FROM users WHERE username IS NULL ORDER BY id")
+        ).mappings().all()
+        for user in legacy_users:
+            local_part = str(user["email"]).split("@", 1)[0].lower()
+            candidate = re.sub(r"[^a-z0-9_.-]+", "-", local_part).strip("._-")[:32]
+            if len(candidate) < 3 or candidate in usernames:
+                candidate = f"legacy-{user['id']}"
+            suffix = 2
+            base_name = candidate
+            while candidate in usernames:
+                suffix_text = f"-{suffix}"
+                candidate = f"{base_name[:32 - len(suffix_text)]}{suffix_text}"
+                suffix += 1
+            connection.execute(
+                text("UPDATE users SET username = :username WHERE id = :user_id"),
+                {"username": candidate, "user_id": user["id"]},
+            )
+            usernames.add(candidate)
+        connection.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_username ON users (username)"
+        ))
 
 
 def create_token(subject: str, purpose: str, expires: timedelta) -> str:
@@ -172,63 +163,10 @@ def decode_token(token: str, purpose: str) -> str:
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
     except jwt.PyJWTError as error:
-        raise HTTPException(status_code=400, detail="This link is invalid or expired.") from error
+        raise HTTPException(status_code=401, detail="Your sign-in session is invalid or expired. Please sign in again.") from error
     if payload.get("purpose") != purpose or not payload.get("sub"):
-        raise HTTPException(status_code=400, detail="This link is invalid or expired.")
+        raise HTTPException(status_code=401, detail="Your sign-in session is invalid or expired. Please sign in again.")
     return str(payload["sub"])
-
-
-def send_email(recipient: str, subject: str, body: str) -> None:
-    resend_key = os.getenv("RESEND_API_KEY")
-    sender = os.getenv("EMAIL_FROM") or os.getenv("SMTP_FROM")
-    if resend_key:
-        if not sender:
-            raise RuntimeError("Configure EMAIL_FROM to send account emails.")
-        request = UrlRequest(
-            "https://api.resend.com/emails",
-            data=json.dumps({
-                "from": sender,
-                "to": [recipient],
-                "subject": subject,
-                "text": body,
-            }).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {resend_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=15) as response:
-                if not 200 <= response.status < 300:
-                    raise RuntimeError(f"Email service returned HTTP {response.status}.")
-        except HTTPError as error:
-            raise RuntimeError(f"Email service rejected the message (HTTP {error.code}).") from error
-        except URLError as error:
-            raise RuntimeError("Could not connect to the email service.") from error
-        return
-
-    host = os.getenv("SMTP_HOST")
-    if not host or not sender:
-        raise RuntimeError("Configure Resend or SMTP credentials to enable school account emails.")
-    message = EmailMessage()
-    message["Subject"] = subject
-    message["From"] = sender
-    message["To"] = recipient
-    message.set_content(body)
-    with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=15) as server:
-        server.starttls()
-        username = os.getenv("SMTP_USER")
-        if username:
-            server.login(username, os.getenv("SMTP_PASSWORD", ""))
-        server.send_message(message)
-
-
-def deliver(recipient: str, subject: str, body: str) -> None:
-    try:
-        send_email(recipient, subject, body)
-    except (OSError, RuntimeError, smtplib.SMTPException, ValueError) as error:
-        raise HTTPException(status_code=503, detail=f"Email delivery is unavailable: {error}") from error
 
 
 def get_current_user(
@@ -236,158 +174,65 @@ def get_current_user(
     db: Session = Depends(get_db),
 ) -> User:
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign in to access this school workspace.")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign in to continue.")
     user_id = decode_token(authorization[7:], "access")
     user = db.get(User, int(user_id)) if user_id.isdigit() else None
-    if user is None or not user.verified:
+    if user is None:
         raise HTTPException(status_code=401, detail="Your account is not available. Sign in again.")
     return user
 
 
-def get_admin(user: User = Depends(get_current_user)) -> User:
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Only a school admin can invite staff.")
-    return user
-
-
-@router.post("/register", status_code=202)
+@router.post("/register", status_code=201)
 @limiter.limit("5/hour")
 def register(request: Request, payload: Registration, db: Session = Depends(get_db)):
-    email = normalized_email(payload.email)
-    if db.scalar(select(User).where(User.email == email)):
-        raise HTTPException(status_code=409, detail="This email already has an account.")
-    school = School(name=payload.school_name.strip())
+    username = normalized_username(payload.username)
+    if db.scalar(select(User).where(User.username == username)):
+        raise HTTPException(status_code=409, detail="That username is already taken. Choose another one.")
+    school = School(name=username)
     db.add(school)
     db.flush()
     user = User(
         school_id=school.id,
-        email=email,
+        username=username,
+        email=f"{username}@accounts.invalid",
         password_hash=password_hash.hash(payload.password),
         role="admin",
-        verified=False,
+        verified=True,
     )
     db.add(user)
-    token = create_token(email, "verify-email", timedelta(hours=24))
-    deliver(email, "Verify your Exam Duty Allocator account", f"Verify your account: {FRONTEND_URL}/?verify_token={token}")
-    db.commit()
-    return {"message": "Check your email to verify your school account."}
-
-
-@router.post("/verify")
-@limiter.limit("10/minute")
-def verify_email(request: Request, payload: TokenInput, db: Session = Depends(get_db)):
-    email = decode_token(payload.token, "verify-email")
-    user = db.scalar(select(User).where(User.email == email))
-    if user is None:
-        raise HTTPException(status_code=400, detail="This verification link is invalid.")
-    user.verified = True
-    db.commit()
-    return {"message": "Email verified. You can now sign in."}
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="That username is already taken. Choose another one.") from error
+    db.refresh(user)
+    return session_response(user)
 
 
 @router.post("/login")
 @limiter.limit("10/minute")
 def login(request: Request, payload: Credentials, db: Session = Depends(get_db)):
-    email = normalized_email(payload.email)
-    user = db.scalar(select(User).where(User.email == email))
+    username = normalized_username(payload.username)
+    user = db.scalar(select(User).where(User.username == username))
     if user is None or not password_hash.verify(payload.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Email or password is incorrect.")
-    if not user.verified:
-        raise HTTPException(status_code=403, detail="Verify your email before signing in.")
+        raise HTTPException(status_code=401, detail="Username or password is incorrect.")
+    return session_response(user)
+
+
+def session_response(user: User) -> dict[str, str]:
     return {
         "access_token": create_token(str(user.id), "access", timedelta(hours=12)),
         "token_type": "bearer",
-        "school_name": db.get(School, user.school_id).name,
+        "username": user.username,
+        "school_name": user.username,
         "role": user.role,
-        "email": user.email,
     }
-
-
-@router.post("/invite", status_code=202)
-@limiter.limit("10/hour")
-def invite_staff(request: Request, payload: InviteRequest, admin: User = Depends(get_admin), db: Session = Depends(get_db)):
-    email = normalized_email(payload.email)
-    if db.scalar(select(User).where(User.email == email)):
-        raise HTTPException(status_code=409, detail="This email already has an account.")
-    raw_token = secrets.token_urlsafe(32)
-    db.add(Invitation(
-        school_id=admin.school_id,
-        email=email,
-        token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
-        expires_at=datetime.now(timezone.utc) + timedelta(days=3),
-    ))
-    deliver(email, "Invitation to your school workspace", f"Accept the invitation: {FRONTEND_URL}/?invite_token={raw_token}")
-    db.commit()
-    return {"message": "Invitation sent."}
-
-
-@router.post("/invite/accept")
-@limiter.limit("10/hour")
-def accept_invitation(request: Request, payload: PasswordResetInput, db: Session = Depends(get_db)):
-    token_hash = hashlib.sha256(payload.token.encode()).hexdigest()
-    invitation = db.scalar(select(Invitation).where(Invitation.token_hash == token_hash))
-    now = datetime.now(timezone.utc)
-    if invitation is None or invitation.accepted or invitation.expires_at.replace(tzinfo=timezone.utc) < now:
-        raise HTTPException(status_code=400, detail="This invitation is invalid or expired.")
-    if db.scalar(select(User).where(User.email == invitation.email)):
-        raise HTTPException(status_code=409, detail="This email already has an account.")
-    db.add(User(
-        school_id=invitation.school_id,
-        email=invitation.email,
-        password_hash=password_hash.hash(payload.password),
-        role="staff",
-        verified=True,
-    ))
-    invitation.accepted = True
-    db.commit()
-    return {"message": "Account created. You can now sign in."}
-
-
-@router.post("/password-reset", status_code=202)
-@limiter.limit("5/hour")
-def request_password_reset(request: Request, payload: PasswordResetRequest, db: Session = Depends(get_db)):
-    email = normalized_email(payload.email)
-    user = db.scalar(select(User).where(User.email == email, User.verified.is_(True)))
-    if user:
-        token = secrets.token_urlsafe(32)
-        db.query(PasswordResetToken).filter(
-            PasswordResetToken.email == email,
-        ).delete(synchronize_session=False)
-        db.add(PasswordResetToken(
-            email=email,
-            token_hash=hashlib.sha256(token.encode()).hexdigest(),
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
-        ))
-        deliver(email, "Reset your Exam Duty Allocator password", f"Reset your password: {FRONTEND_URL}/?reset_token={token}")
-        db.commit()
-    return {"message": "If that verified account exists, a reset link has been sent."}
-
-
-@router.post("/password-reset/confirm")
-@limiter.limit("10/hour")
-def confirm_password_reset(request: Request, payload: PasswordResetInput, db: Session = Depends(get_db)):
-    token_hash = hashlib.sha256(payload.token.encode()).hexdigest()
-    reset_token = db.scalar(select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash))
-    now = datetime.now(timezone.utc)
-    if (
-        reset_token is None
-        or reset_token.consumed
-        or reset_token.expires_at.replace(tzinfo=timezone.utc) < now
-    ):
-        raise HTTPException(status_code=400, detail="This reset link is invalid or expired.")
-    user = db.scalar(select(User).where(User.email == reset_token.email))
-    if user is None or not user.verified:
-        raise HTTPException(status_code=400, detail="This reset link is invalid.")
-    user.password_hash = password_hash.hash(payload.password)
-    reset_token.consumed = True
-    db.commit()
-    return {"message": "Password updated. Sign in with your new password."}
 
 
 @router.get("/me")
 def account_info(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return {
-        "email": user.email,
+        "username": user.username,
         "role": user.role,
         "school_name": db.get(School, user.school_id).name,
     }

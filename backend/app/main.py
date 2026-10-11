@@ -3,7 +3,7 @@ import urllib.parse
 import os
 from io import BytesIO
 from pathlib import Path
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,7 +17,9 @@ from .auth import (
     DutyHistory,
     get_current_user,
     get_db,
+    migrate_legacy_usernames,
     router as auth_router,
+    User,
 )
 from .database import Base, engine
 from .rate_limit import limiter
@@ -30,6 +32,7 @@ app = FastAPI(
     version="1.0.0"
 )
 Base.metadata.create_all(bind=engine)
+migrate_legacy_usernames(engine)
 app.include_router(auth_router)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -74,19 +77,15 @@ def health_check():
 @app.post("/allocate", response_model=AllocationResponse)
 def allocate_duties(
     payload: AllocationRequest,
-    authorization: str | None = Header(default=None),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Generate a schedule using the school's saved totals when authenticated.
+    Generate a schedule using the signed-in user's saved totals.
     """
     try:
-        if authorization:
-            if not authorization.startswith("Bearer "):
-                raise HTTPException(status_code=401, detail="Invalid authorization header.")
-            user = get_current_user(authorization=authorization, db=db)
-            history = db.scalars(select(DutyHistory).where(DutyHistory.school_id == user.school_id)).all()
-            payload.history_totals = {item.teacher_name: item.total_duties for item in history}
+        history = db.scalars(select(DutyHistory).where(DutyHistory.school_id == user.school_id)).all()
+        payload.history_totals = {item.teacher_name: item.total_duties for item in history}
         result = generate_allocation(payload)
         return result
     except ValueError as ve:

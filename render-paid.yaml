@@ -15,10 +15,6 @@ services:
         fromDatabase:
           name: exam-duty-history
           property: connectionString
-      - key: RESEND_API_KEY
-        sync: false
-      - key: EMAIL_FROM
-        sync: false
       - key: RATE_LIMIT_STORAGE_URI
         value: memory://
 
