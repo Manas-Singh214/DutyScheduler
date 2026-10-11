@@ -41,20 +41,33 @@ npm run dev
 
 Open `http://localhost:5173`. Local development uses SQLite for convenience. School account email actions require SMTP settings. Run backend tests from `backend` with `python -m unittest discover -s tests`.
 
-## Public deployment / self-hosting
+## Free pilot deployment (Render + Supabase + Resend)
 
-The recommended self-hosted deployment is one HTTPS web service plus persistent PostgreSQL. The root Dockerfile serves both frontend and API from one origin. Compose also provisions a PostgreSQL volume.
+The default [`render.yaml`](./render.yaml) configures a **free pilot**: one Render Free FastAPI+frontend service, Supabase Free PostgreSQL, and Resend Free for account emails. The root Dockerfile serves the UI and API from the same HTTPS origin.
 
-1. Push the project to a private or public Git hosting repository. Never commit private teacher spreadsheets, SMTP credentials, or a real `.env`.
-2. In Render, create a **Blueprint** from that repository. Render reads [`render.yaml`](./render.yaml) to build the root Dockerfile, provision PostgreSQL, generate the signing secret, and configure `/health`.
-3. Enter the requested `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM` values in Render. Account verification, school invitations, and password recovery need a working SMTP provider.
-4. Wait for the web service and database to become healthy, then share its `https://...onrender.com` URL.
+1. Create a Supabase Free project and copy its PostgreSQL connection string. Keep the password private.
+2. Verify a sender domain in Resend and create an API key. Resend Free currently allows 3,000 emails/month, capped at 100/day; the sender address must use a verified domain.
+3. In Render, create a **Blueprint** from this GitHub repository. Choose the root `render.yaml`; it builds the app and generates `APP_SECRET_KEY`.
+4. When prompted, enter the Supabase `DATABASE_URL`, Resend `RESEND_API_KEY`, and verified `EMAIL_FROM` in Render’s private environment-variable form. Never put these secrets in Git or chat.
+5. Wait for `/health` to pass, then share the generated `https://...onrender.com` URL.
 
-The public Render URL is automatically used to create verification, invitation, and password-reset links. Keep PostgreSQL on a persistent plan with backups.
+Render’s free web service sleeps after 15 minutes without traffic, so the first visit after idle may take about a minute. Supabase Free includes a 500 MB database and can pause projects after a week of inactivity; resume it in Supabase if needed. These free tiers are useful for a pilot, not an uptime or backup guarantee. Monitor each provider’s quotas and terms.
 
-Production startup refuses to run with the development signing key, SQLite, or missing SMTP host/sender. Teacher totals and exam logs are scoped to the authenticated school. One-time visitors do not store data. Local `.env` configuration is for self-hosting and must stay private.
+The public Render URL is automatically used for verification, invitation, and password-reset links. Teacher totals and exam logs are scoped to each authenticated school. One-time visitors do not store data.
 
 Account and workbook-import routes have per-IP limits. The default in-memory limiter is suitable for a single app process; configure `RATE_LIMIT_STORAGE_URI` to a shared Redis store before running multiple replicas.
+
+### Persistent paid Render option
+
+[`render-paid.yaml`](./render-paid.yaml) keeps the app and PostgreSQL on paid Render plans with a persistent database. Use a Blueprint file path of `render-paid.yaml` when creating that paid configuration. Review Render's current service and database prices in your account before confirming.
+
+### Local Docker Compose
+
+For local self-hosting, copy `.env.example` to `.env` and configure `APP_SECRET_KEY`, `POSTGRES_PASSWORD`, and either Resend API settings or SMTP settings, then run:
+
+```powershell
+docker compose up --build
+```
 
 ### Excel history workbook
 

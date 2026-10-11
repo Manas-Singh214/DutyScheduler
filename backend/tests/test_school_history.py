@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 from io import BytesIO
 import unittest
 from unittest.mock import patch
@@ -27,6 +29,7 @@ from app.auth import (
     record_completed_exam,
     register,
     request_password_reset,
+    send_email,
     verify_email,
 )
 
@@ -135,6 +138,24 @@ class SchoolHistoryTests(unittest.TestCase):
         self.assertIn("Password updated", result["message"])
         with self.assertRaises(HTTPException):
             confirm_password_reset(self.request, payload, self.db)
+
+    def test_resend_delivery_uses_https_api_with_configured_sender(self):
+        with patch.dict(os.environ, {
+            "RESEND_API_KEY": "test-api-key",
+            "EMAIL_FROM": "Exam Scheduler <noreply@example.org>",
+        }), patch("app.auth.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value.status = 202
+            send_email("teacher@example.org", "Verify account", "Open the verification link.")
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.resend.com/emails")
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-api-key")
+        self.assertEqual(json.loads(request.data), {
+            "from": "Exam Scheduler <noreply@example.org>",
+            "to": ["teacher@example.org"],
+            "subject": "Verify account",
+            "text": "Open the verification link.",
+        })
 
 
 if __name__ == "__main__":

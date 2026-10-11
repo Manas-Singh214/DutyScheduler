@@ -1,11 +1,14 @@
 import os
 import hashlib
 import io
+import json
 import secrets
 import smtplib
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import Annotated
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as UrlRequest, urlopen
 
 import jwt
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile, status
@@ -31,8 +34,10 @@ if os.getenv("APP_ENV") == "production":
         raise RuntimeError("Set APP_SECRET_KEY to a unique secret before production.")
     if not os.getenv("DATABASE_URL", "").startswith(("postgres://", "postgresql://", "postgresql+psycopg://")):
         raise RuntimeError("Production requires a persistent PostgreSQL DATABASE_URL.")
-    if not os.getenv("SMTP_HOST") or not os.getenv("SMTP_FROM"):
-        raise RuntimeError("Production requires SMTP_HOST and SMTP_FROM for account email.")
+    has_resend = bool(os.getenv("RESEND_API_KEY") and (os.getenv("EMAIL_FROM") or os.getenv("SMTP_FROM")))
+    has_smtp = bool(os.getenv("SMTP_HOST") and (os.getenv("SMTP_FROM") or os.getenv("EMAIL_FROM")))
+    if not (has_resend or has_smtp):
+        raise RuntimeError("Production requires Resend API credentials or SMTP credentials for account email.")
 
 
 class School(Base):
@@ -174,10 +179,38 @@ def decode_token(token: str, purpose: str) -> str:
 
 
 def send_email(recipient: str, subject: str, body: str) -> None:
+    resend_key = os.getenv("RESEND_API_KEY")
+    sender = os.getenv("EMAIL_FROM") or os.getenv("SMTP_FROM")
+    if resend_key:
+        if not sender:
+            raise RuntimeError("Configure EMAIL_FROM to send account emails.")
+        request = UrlRequest(
+            "https://api.resend.com/emails",
+            data=json.dumps({
+                "from": sender,
+                "to": [recipient],
+                "subject": subject,
+                "text": body,
+            }).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {resend_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=15) as response:
+                if not 200 <= response.status < 300:
+                    raise RuntimeError(f"Email service returned HTTP {response.status}.")
+        except HTTPError as error:
+            raise RuntimeError(f"Email service rejected the message (HTTP {error.code}).") from error
+        except URLError as error:
+            raise RuntimeError("Could not connect to the email service.") from error
+        return
+
     host = os.getenv("SMTP_HOST")
-    sender = os.getenv("SMTP_FROM")
     if not host or not sender:
-        raise RuntimeError("Configure SMTP_HOST and SMTP_FROM to enable school account emails.")
+        raise RuntimeError("Configure Resend or SMTP credentials to enable school account emails.")
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = sender
