@@ -39,13 +39,13 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:5173`. Local development uses SQLite for convenience. School account email actions require SMTP settings. Run backend tests from `backend` with `python -m unittest discover -s tests`.
+Open `http://localhost:5173`. Local development uses SQLite for convenience. School account email actions require Resend or SMTP settings. Run backend tests from `backend` with `python -m unittest discover -s tests`.
 
 ## Free pilot deployment (Render + Supabase + Resend)
 
 The default [`render.yaml`](./render.yaml) configures a **free pilot**: one Render Free FastAPI+frontend service, Supabase Free PostgreSQL, and Resend Free for account emails. The root Dockerfile serves the UI and API from the same HTTPS origin.
 
-1. Create a Supabase Free project and copy its PostgreSQL connection string. Keep the password private.
+1. Create a Supabase Free project and copy its **Session pooler** PostgreSQL connection string from **Connect** (Render uses IPv4). Keep the password private and preserve any SSL query parameters.
 2. Verify a sender domain in Resend and create an API key. Resend Free currently allows 3,000 emails/month, capped at 100/day; the sender address must use a verified domain.
 3. In Render, create a **Blueprint** from this GitHub repository. Choose the root `render.yaml`; it builds the app and generates `APP_SECRET_KEY`.
 4. When prompted, enter the Supabase `DATABASE_URL`, Resend `RESEND_API_KEY`, and verified `EMAIL_FROM` in Render’s private environment-variable form. Never put these secrets in Git or chat.
