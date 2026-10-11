@@ -1,0 +1,14 @@
+# Local dependencies and generated builds
+backend/venv/
+frontend/node_modules/
+frontend/dist/
+**/__pycache__/
+*.py[cod]
+
+# Local configuration and generated exports
+.vscode/
+.env
+.env.*
+!.env.example
+*.docx
+*.db
