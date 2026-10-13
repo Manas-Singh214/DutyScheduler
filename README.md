@@ -30,6 +30,10 @@ Virtual environments, `node_modules`, build output, local databases, and private
 
 On Windows, double-click [`EXAMSCHEDULER.bat`](./EXAMSCHEDULER.bat). It creates the backend virtual environment if needed, installs project dependencies, starts the FastAPI backend and Vite frontend in separate windows, and opens `http://localhost:5173`. Python 3 and Node.js must be installed and available on `PATH`. Local development uses SQLite for convenience.
 
+Create an account with a username and a password of at least 12 characters. The backend stores a password hash in the local database; the browser stores only a signed access token, which expires after 12 hours. Registration and sign-in take you to the scheduler home screen, where **Create a duty schedule** opens the scheduling form. Keep both launcher windows open while using the app. If sign-in returns to the login screen, restart the launcher so the backend is running the current version; its CORS policy must allow the `Authorization` header used to restore a session.
+
+Local account and duty-history data is stored in `data/exam_duty.db`. Back up this file before moving or deleting the project folder.
+
 ## Local Docker deployment
 
 This project is designed for local or private self-hosting only. There is no public URL, no external deployment service, and no public access layer.
