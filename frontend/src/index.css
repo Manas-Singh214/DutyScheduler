@@ -3,30 +3,52 @@
 @tailwind utilities;
 
 :root {
-  font-family: 'DM Sans', sans-serif;
-  color: #25332d;
-  background: #f6f8f6;
+  font-family: 'IBM Plex Sans', sans-serif;
+  color: #202d27;
+  background: #f5f7f5;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --paper: #f6f8f6;
+  --paper: #f5f7f5;
   --surface: #ffffff;
-  --line: #dce4df;
-  --ink: #25332d;
-  --muted: #68766f;
-  --accent: #286b55;
-  --accent-soft: #eaf3ee;
+  --line: #d8e0da;
+  --ink: #202d27;
+  --muted: #65746c;
+  --accent: #28614d;
+  --accent-strong: #1d503e;
+  --accent-soft: #eaf1ec;
+  --font-data: 'IBM Plex Mono', monospace;
 }
 
 @layer base {
   body {
     min-height: 100vh;
     margin: 0;
-    font-family: 'DM Sans', sans-serif;
+    font-family: 'IBM Plex Sans', sans-serif;
     color: var(--ink);
     background-color: var(--paper);
-    background-image: repeating-linear-gradient(0deg, transparent, transparent 31px, rgb(38 76 58 / 2.5%) 32px);
+    background-image: repeating-linear-gradient(0deg, transparent, transparent 31px, rgb(38 76 58 / 1.8%) 32px);
     @apply selection:bg-emerald-100 selection:text-emerald-950;
   }
+
+  *,
+  *::before,
+  *::after {
+    letter-spacing: 0 !important;
+  }
+}
+
+.font-sans {
+  font-family: 'IBM Plex Sans', sans-serif !important;
+}
+
+.font-mono,
+input[type='date'] {
+  font-family: var(--font-data) !important;
+}
+
+table {
+  font-family: 'IBM Plex Sans', sans-serif !important;
+  font-variant-numeric: tabular-nums;
 }
 
 .glass-panel {
@@ -49,6 +71,20 @@
 .glass-input:focus {
   border-color: var(--accent) !important;
   box-shadow: 0 0 0 2px rgb(40 107 85 / 12%);
+}
+
+.glass-input::placeholder {
+  color: #87938c;
+  opacity: 1;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: 2px;
 }
 
 .bg-slate-950,
@@ -107,6 +143,26 @@
   color: #fff !important;
   background-color: var(--accent) !important;
   background-image: none !important;
+}
+
+button.bg-emerald-800,
+button.bg-emerald-700,
+button.bg-emerald-600,
+button.bg-blue-600,
+button.bg-indigo-600,
+button[class*="bg-gradient-to-r"] {
+  color: #fff !important;
+  background-color: var(--accent-strong) !important;
+  background-image: none !important;
+}
+
+button.bg-emerald-800:hover,
+button.bg-emerald-700:hover,
+button.bg-emerald-600:hover,
+button.bg-blue-600:hover,
+button.bg-indigo-600:hover,
+button[class*="bg-gradient-to-r"]:hover {
+  background-color: #173f32 !important;
 }
 
 [class*="bg-blue-500/"],

@@ -740,7 +740,7 @@ PostCSS is a CSS processing tool used in the frontend build pipeline. The PostCS
 
 Lucide React provides icons as React components. These are decorative and do not implement the scheduling logic.
 
-The HTML entry point also links to the DM Sans font from Google Fonts. The app's data and API operations run locally, but the browser may make an external request to load that font when internet access is available. The CSS defines fallback sans-serif fonts, so the interface can still render if that external font cannot load. This is an external font resource, not a hosted backend or public app URL.
+The HTML entry point links to IBM Plex Sans and IBM Plex Mono from Google Fonts. The app's data and API operations run locally, but the browser may make an external request to load these fonts when internet access is available. CSS fallback fonts keep the interface readable if they cannot load. These are external font resources, not a hosted backend or public app URL.
 
 22. What a .bat file is and what this launcher does
 
@@ -1038,7 +1038,7 @@ The local batch launcher uses:
 
 This arrangement means a person at the same computer can use the app in a browser. It is not a public URL, and it does not create shared accounts for users on different computers.
 
-The application still needs internet access during first-time package installation unless all required package files are already cached. The page also references Google Fonts for DM Sans. If internet access is unavailable, the page uses its fallback sans-serif font. These facts do not mean the API or database is hosted remotely.
+The application still needs internet access during first-time package installation unless all required package files are already cached. The page also references Google Fonts for IBM Plex Sans and IBM Plex Mono. If internet access is unavailable, the page uses its fallback sans-serif and monospace fonts. These facts do not mean the API or database is hosted remotely.
 
 Docker Compose maps port 8000 from the container to the host. Depending on Docker and firewall configuration, a published port may be reachable from other devices on the same private network. If only the same-computer user should access a Docker deployment, review the port binding and host firewall settings. Do not expose it to the public internet without deployment and security work.
 
@@ -1131,7 +1131,7 @@ The first worksheet must include a recognized teacher-name heading and total-dut
 
 The app looks different without internet access
 
-The app's core local functions do not require a hosted service. The Google Fonts DM Sans asset may not load, in which case the page uses a fallback sans-serif font. First-time package setup still needs downloads unless dependencies are already cached.
+The app's core local functions do not require a hosted service. The Google Fonts IBM Plex Sans and IBM Plex Mono assets may not load, in which case the page uses fallback fonts. First-time package setup still needs downloads unless dependencies are already cached.
 
 History seems to have disappeared
 
