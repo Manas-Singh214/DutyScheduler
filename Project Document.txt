@@ -1,1216 +1,285 @@
-PROJECT DOCUMENT
-Exam Duty Allocator
+EXAM DUTY ALLOCATOR
+Project and System Design Document
+
+Purpose
+
+This document describes the system as implemented in this repository. It is a concise reference for users, maintainers, demonstrations, and technical interviews. Implemented behavior is stated as fact; future improvements are identified as recommendations. The application is local-first and is not a public hosted service.
+
+1. Project summary
+
+Exam Duty Allocator creates room-by-room invigilation schedules for examination sessions. It uses saved teacher duty totals to favor teachers with fewer previous and current duties, prevents assigning a teacher to multiple rooms in the same session, and lists unused teachers as standby staff.
+
+Users can review and adjust assignments, export a Word duty chart, and explicitly record completed exams in account history. CSV/Excel input and Excel history import/export are supported. Generated schedules do not affect future history until the user marks an exam complete.
 
-Purpose of this document
+Primary objectives:
+- Reduce manual work preparing exam duty charts.
+- Distribute repeated duties using transparent historical totals.
+- Keep each account's history separate.
+- Support a simple local Windows workflow, with Docker Compose as an optional private self-hosting route.
+
+2. Architecture and system design
+
+Logical flow
+
+  Browser (React UI)
+       | HTTP JSON, multipart uploads, Bearer access token
+       v
+  FastAPI application
+       |-- Pydantic validation and API routes
+       |-- Allocation algorithm and export/import operations
+       |-- Authentication and account-scoped history
+       v
+  SQLAlchemy database layer ---> SQLite (local) or PostgreSQL (Docker Compose)
+
+Development serves the frontend through Vite at http://localhost:5173 and the API through Uvicorn at http://localhost:8000. The browser calls the API over HTTP. In the Docker image, Vite builds static frontend files and FastAPI serves those files and the API from the same application origin on port 8000.
+
+Request lifecycle for schedule generation:
+1. The React form collects the exam, sessions, teachers, and rooms.
+2. The frontend sends JSON to POST /allocate with the signed-in user's Bearer token.
+3. FastAPI validates the request with Pydantic and resolves the account from the token.
+4. The route loads duty totals for that account's workspace. It replaces any history totals supplied by the browser with database values.
+5. The allocator selects teachers and returns schedule, duty counts, and standby names.
+6. The frontend renders the result. Edits remain in browser state until export or explicit completion.
+
+Data persistence boundaries:
+- SQLite or PostgreSQL stores users, password hashes, cumulative duty totals, completed-exam logs, per-exam duty contributions, and imported-workbook hashes.
+- The browser keeps the access token in localStorage and holds the current unsaved schedule in application state.
+- CSV parsing is done in the browser. Excel parsing and history operations are performed by the backend.
+- DOCX export is primarily server-side; the frontend has a fallback exporter if the API export fails.
+
+3. Technology and repository map
+
+Frontend: JavaScript/JSX, React 18, Vite 5, Tailwind CSS 3, Lucide React, docx, and FileSaver. The frontend uses Fetch and FormData for API requests and uploads. It is not written in TypeScript.
+
+Backend: Python 3.11 in Docker; FastAPI, Pydantic 2, Uvicorn, SQLAlchemy 2, PyJWT, pwdlib with Argon2 support, SlowAPI, openpyxl, and python-docx.
+
+Important files:
+- frontend/src/App.jsx: sign-in, navigation, API calls, schedule and history state.
+- frontend/src/components/DataEntryForm.jsx: exam/session inputs and teacher/room imports.
+- frontend/src/components/Dashboard.jsx: schedule display, swaps, standby substitutions, completion, and export actions.
+- frontend/src/utils/api.js: API base URL selection.
+- frontend/src/utils/spreadsheetImport.js: browser CSV parsing and Excel upload flow.
+- frontend/src/utils/docxExporter.js: client-side DOCX fallback.
+- backend/app/main.py: FastAPI setup, routes, CORS, startup initialization, and static frontend serving.
+- backend/app/auth.py: account/history models, authentication, history routes, and Excel history handling.
+- backend/app/allocator.py: scheduling and fairness logic.
+- backend/app/models.py: request and response schemas.
+- backend/app/database.py: SQLAlchemy engine and session configuration.
+- backend/app/exporter.py: server-side DOCX generation.
+- backend/app/rate_limit.py: IP-based rate limiter setup.
+- backend/tests/: backend unit and regression tests.
+- EXAMSCHEDULER.bat: Windows local development launcher.
+- Dockerfile and docker-compose.yml: built frontend/backend image and PostgreSQL self-hosting stack.
+
+4. Scheduling behavior
+
+Inputs are school name, exam name, one or more sessions, teacher names, room names, and historical totals. Session date and time slot are strings; the backend does not currently validate calendar dates, time zones, or overlaps.
+
+Allocation algorithm:
+1. Trim teacher and room names, remove blank values, and de-duplicate exact strings while preserving order.
+2. Reject missing teachers, rooms, or sessions. Reject any session with more rooms than teachers.
+3. For each session, make every teacher available. For each room, choose an available teacher with the lowest historical total plus duties already assigned in this request.
+4. Select randomly among equal minimum totals using Python's SystemRandom. Remove each selected teacher from availability for that session, then increment their current duty count.
+5. Return the assignments, duty counts, total shifts, and teachers who were never assigned as standby.
+
+A teacher can work in different sessions but at most once in each session. The algorithm is a greedy heuristic, not a global optimizer. It does not model availability, preferences, qualifications, room constraints, maximum workload, or weighted duties. Name matching is exact, so inconsistent spelling/capitalization splits a teacher's history.
+
+Manual changes are checked by the frontend. It computes cumulative totals (saved history plus current schedule) and permits a swap or standby substitution only if the highest-minus-lowest total does not increase. This is a guardrail, not a proof of global optimality.
+
+5. Data model and history
+
+Each registration creates a user and a separate School workspace. Current history is scoped by school_id, so one account does not read or change another account's totals. To share a workspace, users must share the same login; there is no multi-user invitation flow.
+
+Database records:
+- School: account history workspace.
+- User: normalized unique username, school link, password hash, and role. Legacy email and verified columns remain for compatibility; new accounts do not use email.
+- DutyHistory: cumulative total per teacher within a workspace.
+- CompletedExam: exam name, identifier, and completion time; workspace plus exam identifier is unique.
+- ExamDuty: per-exam teacher contributions used for the exam log.
+- DutyImport: SHA-256 hash preventing the same exact workbook bytes from being imported twice into one workspace.
+
+History rules:
+- Completing an exam adds its counts to cumulative totals and records the per-exam log. Duplicate exam identifiers in the same workspace are rejected.
+- History workbook imports add totals; they do not replace or reconcile existing totals.
+- History export contains Teacher Totals and Exam Log sheets.
+- Exact teacher names are the history key. Stable naming is important.
+- SQLite is created at data/exam_duty.db when DATABASE_URL is unset. Docker Compose uses PostgreSQL and a persistent named volume.
+
+6. Authentication
+
+Registration accepts usernames of 3-32 letters, digits, dots, underscores, or hyphens. Usernames are trimmed and converted to lowercase. Passwords must be 12-256 characters. A password is hashed using pwdlib's recommended configuration, which supports Argon2; plaintext passwords are not stored.
+
+On successful registration or login, the API issues a signed JWT:
+- Algorithm: HS256.
+- Claims include user ID (sub), token purpose, issued-at time, and expiration.
+- Access-token lifetime: 12 hours.
+- Protected requests send Authorization: Bearer <token>.
+- The backend verifies signature, expiry, purpose, and that the user still exists.
+- The frontend stores the access token in localStorage and removes it when invalid or when the user signs out. There is no server-side token revocation or refresh-token flow.
+
+There is no email verification, password reset, account recovery, or account transfer. New registration creates an isolated workspace and cannot recover an old account's history.
+
+7. API and file formats
+
+Health and docs:
+- GET /health: unauthenticated process health response.
+- GET /docs: FastAPI interactive API documentation during local operation.
+- GET /: serves the built frontend when available; otherwise returns API status information.
+
+Authentication and history:
+- POST /auth/register: create account; limited to 5 requests per IP per hour.
+- POST /auth/login: verify credentials; limited to 10 requests per IP per minute.
+- GET /auth/me: return current account details; authenticated.
+- GET /auth/history: return current cumulative totals; authenticated.
+- POST /auth/history/record: record a completed exam; authenticated.
+- POST /auth/history/import: add totals from an XLSX/XLSM workbook; authenticated; limited to 5 requests per IP per hour.
+- GET /auth/history/export.xlsx: download totals and exam log; authenticated.
+
+Scheduling and files:
+- POST /allocate: generate a schedule from account history; authenticated.
+- POST /import-list: read non-empty rows from the active worksheet of an XLSX/XLSM file; no authentication is currently required.
+- POST /export: generate a DOCX from the submitted schedule; no authentication is currently required.
+
+File handling:
+- CSV lists are parsed in the browser. Excel lists accept .xlsx/.xlsm and the backend reads the active worksheet.
+- List and history workbook uploads are limited to 10 MB. History workbooks need a recognized teacher-name column (Teacher, Teacher Name, Staff, Staff Name) and a duty-count column (Total Duties, Duties, Duty Count, Total Shifts). Counts must be non-negative integers.
+- DOCX output contains session/room assignments and standby lists, not a fairness matrix. Client and server exporters are separate implementations and should be kept consistent.
 
-This document explains the Exam Duty Allocator as it is implemented in this repository. It is intended for project handover, maintenance, demonstrations, and technical interviews. It describes the current code rather than proposed features. The application is designed for local use. The Windows launcher starts the user interface and API on the same computer.
+8. Security and privacy
 
-How to use this document
+Implemented controls:
+- Passwords are stored as password hashes, not plaintext.
+- Protected account, history, and allocation routes require a signed, expiring Bearer token.
+- The backend scopes history queries to the authenticated user's workspace.
+- Registration, login, and history import have IP-based rate limits.
+- CORS allows configured browser origins and specific methods/headers. CORS is a browser policy, not API authentication.
+- Excel uploads have an extension allowlist and 10 MB limit; history imports validate columns and values.
+- APP_ENV=production rejects the known development signing key and requires PostgreSQL.
 
-Read sections 1 to 4 first for the product overview, technology stack, and file map.
-Read sections 5 to 10 for the data, user journey, algorithm, API, file formats, and configuration.
-Read sections 11 to 14 for security, tests, limitations, and engineering decisions.
-Read section 15 for interview questions and suggested answers.
-Read sections 18 to 31 for beginner-level explanations of the tools and a detailed run-through of what happens when the project starts.
-Read sections 32 to 35 for troubleshooting, development guidance, and extra interview review.
+Security boundaries and risks:
+- The local launcher binds Vite and Uvicorn to 127.0.0.1. The Docker container binds to 0.0.0.0 and Compose publishes a host port; remote exposure depends on host/network configuration.
+- The project does not configure TLS, a reverse proxy, encrypted database storage, automated backups, or production security headers. Do not expose it publicly without adding and reviewing these controls.
+- localStorage is accessible to JavaScript running in the page, so a successful cross-site scripting flaw could expose the token. Use HTTPS for remote access and assess a secure cookie or other token-storage strategy before public deployment.
+- The API's list-import and DOCX-export routes are currently unauthenticated. CORS does not prevent non-browser clients from calling them.
+- The default development JWT key is only for local use. Production requires a unique secret kept outside source control.
+- Rate limits use in-memory storage by default; limits are not shared across app processes. Use a shared store such as Redis for multiple replicas.
+- The application does not automatically back up the SQLite file or PostgreSQL volume. Teacher names and duty records may be sensitive operational data; restrict access and back up securely.
 
-This is a plain text file. The numbered titles are section headings. A blank line separates paragraphs and topics. The hyphen character is used for simple lists.
+9. Run and deployment
 
-1. Project overview
+Windows local development:
+1. Install Python 3 and Node.js/npm and make them available on PATH.
+2. Run EXAMSCHEDULER.bat from the repository. It creates backend/venv if needed, installs backend requirements, runs npm ci if frontend dependencies are missing, starts Uvicorn and Vite in separate windows, then opens http://localhost:5173.
+3. Keep both service windows open. Closing them stops the application.
+4. Local SQLite history is stored in data/exam_duty.db. Back it up before moving or removing the project.
 
-Exam Duty Allocator is a web application for preparing examination invigilation schedules. A user enters an institution, an exam, exam sessions, teachers, and rooms. The backend assigns teachers to rooms for each session while considering saved duty totals from earlier exams. The user reviews the schedule, can make acceptable assignment exchanges, downloads a compact Word duty chart, and can explicitly save completed duties to the account history.
+Docker Compose private self-hosting:
+1. Create a .env file with unique APP_SECRET_KEY and POSTGRES_PASSWORD values. APP_PORT and RATE_LIMIT_STORAGE_URI are optional.
+2. Run docker compose up --build, then open http://localhost:8000.
+3. Compose builds the frontend, runs the API in production mode, starts PostgreSQL, and persists PostgreSQL data in the exam-duty-data volume.
 
-The application also supports importing teacher and room lists from CSV or Excel files, importing prior teacher duty totals from Excel, viewing and exporting saved history, and listing teachers who remain available as standby staff in each session.
+Configuration:
+- DATABASE_URL: optional database URL; default is local SQLite, Docker sets PostgreSQL.
+- APP_SECRET_KEY: JWT signing secret; use a unique secret in deployment.
+- APP_ENV: setting production activates production startup checks.
+- CORS_ORIGINS: comma-separated allowed browser origins; defaults to local Vite origins.
+- RATE_LIMIT_STORAGE_URI: SlowAPI storage; defaults to in-memory.
+- VITE_API_URL: optional API base URL compiled into the frontend; development defaults to localhost:8000 and production defaults to same-origin.
 
-The application is composed of two local development processes:
+The Windows launcher is for local development, not a Windows service or hardened production install. Docker is an alternative self-hosting setup, not a public cloud deployment. For access beyond the local machine, configure TLS, network restrictions, backups, monitoring, and shared rate-limit storage.
 
-- A React frontend served by Vite at http://localhost:5173.
-- A FastAPI backend served by Uvicorn at http://localhost:8000.
+10. Testing and CI/CD
 
-The frontend calls the backend over HTTP. The local default database is SQLite. Docker Compose provides an alternate self-hosted setup using PostgreSQL.
+The repository has backend unittest coverage for allocation, account/history behavior, spreadsheet handling, migration, and DOCX output. Run from the backend directory:
 
-2. Main requirements addressed
+  python -m unittest discover -s tests
 
-- Generate a room-by-room duty chart showing room, shift one teacher, and shift two teacher.
-- Keep one teacher from being assigned to more than one room in the same session.
-- Use prior duty totals to give priority to teachers with fewer historical and current duties.
-- Randomize ties so equal-duty teachers do not always receive assignments in the same order.
-- Show standby teachers by session and allow eligible standby replacements.
-- Allow exchanges between assigned teachers when the exchange does not increase the total duty-count spread.
-- Import teacher and room lists from CSV and Excel files.
-- Maintain teacher totals and completed exam records in account-scoped history.
-- Import and export historical totals as Excel workbooks.
-- Export a compact DOCX duty chart with standby lists rather than a fairness matrix.
-- Run locally from one Windows batch file without manually launching backend and frontend commands.
+Frontend package scripts:
+- npm run lint: ESLint checks JavaScript/JSX.
+- npm run build: Vite production build.
 
-3. Technology stack
+There is no configured CI/CD pipeline or GitHub Actions workflow in this repository. These commands are currently run manually. Docker builds the frontend and installs the backend, but its Dockerfile does not run the test suite. No dedicated frontend automated test suite is currently configured.
 
-Frontend
+Recommended future CI pipeline (not currently implemented): install dependencies; run backend unit tests; run frontend lint and build; build the Docker image; publish/deploy only after tests pass and deployment secrets are configured. Production deployment should be a controlled, reviewed step rather than embedding secrets in the image or repository.
 
-- JavaScript with JSX. The project does not use TypeScript.
-- React 18 for components, application state, and rendering.
-- Vite 5 for local development and frontend production builds.
-- Tailwind CSS 3 plus project CSS for layout, color, and responsive styling.
-- Lucide React for interface icons.
-- The docx package and FileSaver for browser-side DOCX creation and file downloads.
-- Fetch, FormData, and localStorage for API communication, file uploads, and browser token persistence.
+11. Limitations and next improvements
 
-Backend
+Current limitations:
+- Greedy fairness is not a full constraint solver; teacher availability, qualifications, preferences, and maximum workloads are not modeled.
+- Dates and times are strings without calendar, time-zone, or overlap validation.
+- Exact name matching can split totals when spelling or capitalization changes.
+- There is no recovery flow, multi-user workspace invitation, token revocation, or automatic backup.
+- In-memory rate limits are suitable for one process, not coordinated replicas.
+- Python requirements specify minimum versions, not a fully locked environment; the frontend does have package-lock.json and uses npm ci.
+- There is no frontend automated test suite or CI/CD workflow.
 
-- Python 3 for application and scheduling logic.
-- FastAPI for HTTP routes, request handling, response generation, and OpenAPI documentation.
-- Pydantic 2 for request and response validation.
-- Uvicorn for the local ASGI development server.
-- SQLAlchemy 2 for database connections and ORM models.
-- SQLite for local launcher usage. PostgreSQL is configured for the Docker Compose deployment.
-- python-docx for server-side Word document generation.
-- openpyxl for reading and writing Excel workbooks.
-- PyJWT for signed access tokens using the HS256 algorithm.
-- pwdlib with Argon2 support for password hashing and verification.
-- SlowAPI for rate limiting selected routes.
-- python-multipart for uploaded file handling.
+Practical improvements, if required: canonical teacher IDs and merge tools; date/time validation; availability and qualification constraints; frontend integration tests; Python dependency locking; backup/restore procedures; shared rate-limit storage; and deployment hardening. A constraint solver is appropriate only if real scheduling rules outgrow the current heuristic.
 
-Local environment and deployment support
+12. Interview and review questions
 
-- EXAMSCHEDULER.bat is the one-click Windows development launcher.
-- Dockerfile builds the frontend and serves its production files with FastAPI.
-- docker-compose.yml starts the Docker application and PostgreSQL database.
-- npm and package-lock.json install and lock frontend packages.
-- backend/requirements.txt lists Python package minimum versions. It does not pin every dependency to an exact version.
+Q: What problem does this application solve?
+A: It automates room-level exam invigilation assignments, exposes standby staff, and uses historical totals to distribute repeated duties more evenly.
 
-4. Repository structure
+Q: Explain the architecture.
+A: React/Vite is the browser client; FastAPI validates and serves API requests; the allocator implements scheduling; SQLAlchemy persists accounts and history in SQLite locally or PostgreSQL in Docker. The browser communicates with the API over HTTP.
 
-backend/app/main.py
-Defines the FastAPI application, HTTP routes for allocation, upload, export, health checks, and optional serving of the built frontend. It includes the authentication router, configures CORS, initializes database tables, and runs the legacy username migration. The static directory is backend/static when running from the repository and /app/static inside the Docker image.
+Q: How does a schedule request work?
+A: The frontend submits sessions, teachers, and rooms to POST /allocate with a Bearer token. The backend resolves the user, loads that workspace's history, runs the allocator, and returns a validated response for the dashboard.
 
-backend/app/allocator.py
-Contains the duty assignment algorithm. It cleans and de-duplicates teacher and room names, validates scheduling inputs, assigns teachers using history-aware greedy selection, randomizes equal-total choices, and calculates standby and duty-count results.
+Q: How is fairness implemented?
+A: For each room, choose an available teacher minimizing historical duties plus duties assigned earlier in the current generation. Randomize equal-total ties. A selected teacher is unavailable for the rest of that session.
 
-backend/app/models.py
-Defines Pydantic data models for sessions, allocation requests, assignments, schedules, duty counts, allocation responses, and DOCX export requests.
+Q: Is the generated schedule globally optimal?
+A: No. It is a greedy heuristic that balances duty counts locally. It does not consider availability, qualifications, preferences, or other complex constraints.
 
-backend/app/auth.py
-Defines SQLAlchemy account and history models, username and password registration and sign-in, JWT creation and verification, legacy username migration, exam history operations, and Excel history import and export.
+Q: How do manual edits protect balance?
+A: The frontend compares the cumulative highest-to-lowest duty spread before and after a proposed swap or standby replacement and rejects changes that increase that spread.
 
-backend/app/database.py
-Creates the SQLAlchemy engine and session factory. Without DATABASE_URL it creates a SQLite database at data/exam_duty.db in the project root. It creates the data directory when needed.
+Q: Why save history only after completion?
+A: A generated schedule may be a draft. Explicit completion prevents unused plans from incorrectly affecting future allocations.
 
-backend/app/exporter.py
-Creates the compact server-generated DOCX document. The chart contains the room number and two teacher shift columns, then standby lists. The fairness matrix is not rendered as a separate table.
+Q: How does authentication work?
+A: The API hashes passwords, returns a signed HS256 JWT after registration/login, and requires the token in a Bearer header for protected routes. Tokens expire after 12 hours; the frontend stores them in localStorage.
 
-backend/app/rate_limit.py
-Creates the SlowAPI limiter. The default storage is in-memory.
-
-backend/tests/
-Contains Python unittest tests for allocation, export and spreadsheet import, account behavior, historical balancing, and legacy username migration.
-
-frontend/src/App.jsx
-Owns the primary frontend state and workflow. It handles sign-in, registration, API calls, history access, allocation requests, schedule export, and marking an exam complete.
-
-frontend/src/components/DataEntryForm.jsx
-Collects school and exam details, sessions, teachers, and rooms. It accepts pasted text and spreadsheet imports.
-
-frontend/src/components/Dashboard.jsx
-Displays the room duty chart, shift pairs, standby staff, schedule exchanges, standby substitutions, history completion, and DOCX export actions.
-
-frontend/src/utils/spreadsheetImport.js
-Parses CSV in the browser and sends Excel list files to the backend for first-sheet parsing.
-
-frontend/src/utils/docxExporter.js
-Provides a client-side DOCX fallback if server-side DOCX export fails.
-
-frontend/src/utils/api.js
-Selects the API base URL. During Vite development the default backend address is http://localhost:8000. In a production build the default is the same origin.
-
-EXAMSCHEDULER.bat
-Checks for Python and npm, creates the backend virtual environment if missing, installs Python requirements, installs frontend dependencies if Vite is missing, starts both services in separate command windows, and opens the browser.
-
-Dockerfile
-Builds the frontend using Node.js, installs the Python backend requirements, copies the built UI into the backend static directory, and runs the API server.
-
-docker-compose.yml
-Runs the application and PostgreSQL with persistent database volume storage. It expects local environment variables in a .env file.
-
-5. Data model and important types
-
-Scheduling request types
-
-SessionInput
-- id: optional string.
-- date: string.
-- time_slot: string.
-- session_name: optional string.
-
-Dates and time ranges are represented as strings, not Python date or datetime objects. The UI sends the selected values as text. The backend currently does not parse or validate their calendar or time semantics.
-
-AllocationRequest
-- school_name: string.
-- exam_name: string.
-- sessions: list of SessionInput.
-- teachers: list of strings.
-- rooms: list of strings.
-- history_totals: dictionary mapping teacher-name strings to integer duty totals.
-
-Assignment
-- room: string.
-- teacher: string.
-
-SessionSchedule
-- session_id: string.
-- date: string.
-- time_slot: string.
-- session_name: string.
-- assignments: list of Assignment.
-
-TeacherDutyCount
-- teacher: string.
-- total_duties: integer.
-
-AllocationResponse
-- school_name and exam_name: strings.
-- schedule: list of SessionSchedule.
-- fairness_matrix: list of TeacherDutyCount objects used by the application for totals and persistence.
-- total_teachers, total_rooms, and total_shifts: integers.
-- standby_teachers: list of teacher-name strings not used in any generated session.
-- history_totals: dictionary of historical totals used for allocation.
-
-The fairness_matrix remains part of the in-memory/API result because the dashboard uses it to show teacher totals and save the exam. Its presence does not mean it is printed in the DOCX. The exporter creates the compact duty chart and standby text.
-
-Database entities
-
-School
-- Integer primary key.
-- Name string.
-- Represents the history workspace for an account.
-
-User
-- Integer primary key.
-- Foreign key to School.
-- Unique username string, normalized to lowercase.
-- Password hash string.
-- Role string.
-- A legacy email field and verified field remain for compatibility with older database layouts. New registration does not require an email address.
-- New accounts receive a synthetic value in the legacy email column ending in @accounts.invalid so the old non-null unique column remains satisfied. It is not a real address, is not sent mail, and is not part of the sign-in form.
-
-DutyHistory
-- Integer primary key.
-- School foreign key.
-- Teacher name string.
-- Integer total duties.
-- A uniqueness constraint prevents duplicate teacher names within the same school workspace.
-
-CompletedExam
-- Integer primary key.
-- School foreign key.
-- Exam identifier string, exam name string, and completion timestamp.
-- The combination of school and exam identifier is unique.
-
-ExamDuty
-- Integer primary key.
-- School foreign key.
-- Exam identifier, teacher name, and integer duty count.
-- Stores the per-exam contributions that make up the history.
-
-DutyImport
-- Integer primary key.
-- School foreign key.
-- SHA-256 content hash of an imported workbook.
-- Prevents importing the exact same workbook bytes into the same workspace more than once.
-
-6. End-to-end user workflow
-
-Starting the project
-
-1. The user double-clicks EXAMSCHEDULER.bat in the repository folder.
-2. The launcher checks whether Python and npm are available on PATH.
-3. If backend/venv does not exist, the launcher creates a Python virtual environment there.
-4. It installs or verifies Python packages from backend/requirements.txt.
-5. If frontend/node_modules does not contain Vite, it runs npm ci in frontend.
-6. It starts Uvicorn on the loopback address 127.0.0.1 port 8000.
-7. It starts Vite on the loopback address 127.0.0.1 port 5173.
-8. It opens http://localhost:5173 in the default browser.
-9. The two terminal windows must remain open while the app is in use. Closing them stops the services.
+Q: What is the main authentication trade-off?
+A: Stateless JWT verification avoids a server-side session lookup, but tokens are not revocable before expiry and localStorage is exposed to page JavaScript. There is no refresh or account recovery flow.
 
-Account creation and sign-in
+Q: How are records isolated?
+A: Each registration creates a workspace. History reads and writes filter by that workspace ID. Sharing requires sharing one account's credentials; there is no invitation or role-management workflow.
 
-1. A first-time user chooses account creation.
-2. The username must be 3 to 32 characters and use letters, digits, dots, underscores, or hyphens. Usernames are converted to lowercase.
-3. New account passwords must be at least 12 characters.
-4. The backend hashes the password before storing it. It does not store the submitted password in plaintext.
-5. The backend issues a signed access JWT that expires after 12 hours.
-6. The frontend stores that token in browser localStorage and sends it as a Bearer token for protected API calls.
-7. On later visits, the frontend checks the token with the account endpoint. Invalid or expired tokens are removed and the user is returned to sign-in.
-8. There is no password reset, email confirmation, or account recovery. A forgotten account requires making a new account; the previous history remains in the old account.
+Q: Why SQLite and PostgreSQL?
+A: SQLite makes local setup self-contained. PostgreSQL is used by Docker Compose for a separate persistent database service and is required by the production startup guard.
 
-Creating a schedule
+Q: How are spreadsheet re-imports handled?
+A: The history importer validates the first worksheet and adds non-negative integer totals. A SHA-256 hash per workspace rejects an identical workbook upload; importing a changed workbook can add totals again.
 
-1. The user enters institution name and exam name.
-2. The user configures one or more sessions with date, time, and session label.
-3. Teacher and room names can be pasted as comma-separated or newline-separated values.
-4. CSV list files are read by the browser. Excel list files are sent to the backend, which reads the first worksheet and returns its rows. The frontend detects a likely teacher or room column from its header and lets the user select a column.
-5. The frontend sends the request as JSON to POST /allocate and adds the Bearer token.
-6. The backend loads history totals for the account's school workspace and replaces the request history_totals with those saved totals.
-7. The allocator produces one assignment per room per session.
-8. The frontend displays sessions in a room-based chart and shows standby teachers for each session.
+Q: What does CI/CD mean here, and what is implemented?
+A: CI runs automated integration checks on changes; CD automates delivery/deployment. This repository has no configured pipeline. Backend tests, frontend lint/build, and Docker build are available commands, but are not automatically run by a CI service.
 
-Reviewing and changing a schedule
+Q: What are the key security controls and gaps?
+A: Password hashing, expiring signed tokens, route-level authentication, account-scoped history, upload limits, and selected rate limits are implemented. TLS, backups, encrypted storage, shared rate-limit storage, and public-deployment hardening are not configured. CORS is not an authentication control.
 
-1. The user chooses an assignment in the chart.
-2. The user can choose another visible assignment to exchange teachers, or choose an eligible standby teacher for that selected session.
-3. The frontend recomputes total duties using saved historical totals plus the proposed schedule.
-4. The change is accepted only if the maximum-minus-minimum duty count does not increase compared with the current schedule.
-5. The UI updates the chart and the per-teacher duty counts after an accepted change.
-6. Schedule edits are held in frontend state until the user marks the exam complete. They are not saved as completed history automatically.
+Q: What would you improve next?
+A: Add frontend tests and CI, formal date/time and scheduling constraints, canonical teacher IDs, recovery and collaboration if needed, and documented secure backup/deployment procedures.
 
-Exporting and saving history
+13. Demonstration checklist
 
-- Export DOCX sends the reviewed schedule to POST /export. The server returns a Word document. The frontend also has a browser-side DOCX fallback.
-- The DOCX groups sessions into shift pairs and contains the room number, shift one teacher, shift two teacher, and standby lists. It does not display a fairness matrix.
-- Mark exam complete sends teacher duty counts to POST /auth/history/record.
-- The backend rejects a duplicate exam identifier within the same account workspace.
-- History view shows saved teacher totals. An Excel history import adds totals to existing values.
-- Re-importing exactly identical workbook bytes is rejected using the stored SHA-256 hash.
-- History export downloads an Excel workbook with a Teacher Totals sheet and an Exam Log sheet.
+- Start the app and create an account.
+- Generate a schedule with at least as many teachers as rooms.
+- Show unique assignments per session, saved-history balancing, and standby names.
+- Demonstrate an allowed edit and an edit rejected for worsening the duty spread.
+- Export a DOCX, mark the exam complete, and verify the updated history.
+- Export history to Excel and explain that local data resides in data/exam_duty.db.
+- State clearly that no CI/CD workflow or public hosted deployment is configured.
 
-7. Allocation algorithm
+Quick glossary
 
-The scheduler is a greedy history-aware algorithm. It does not search every possible schedule or solve a general optimization problem.
+API: HTTP routes used by the frontend to request backend operations.
+Bearer token: an access token sent in the Authorization HTTP header.
+CORS: browser policy controlling which web origins may read API responses; it is not access control for the API itself.
+CI/CD: automated integration checks and delivery/deployment workflows.
+Greedy heuristic: an algorithm that makes the best available local choice at each step rather than searching all complete solutions.
+ORM: a library, SQLAlchemy here, that maps Python objects to relational database records.
+Workspace: the account-scoped School record that owns teacher totals and exam history.
 
-For each request:
-
-1. Teacher names and room names are trimmed and exact duplicate strings are removed while preserving first-seen order.
-2. Empty teacher names and room names are rejected. At least one session is required.
-3. Historical totals for teachers not in the current teacher list are ignored. Negative history values are treated as zero.
-4. A current duty counter starts at zero for each listed teacher.
-5. For each session, the allocator starts with all teachers marked available.
-6. For each room in order, it finds the available teacher with the smallest historical total plus current-request duty count.
-7. If multiple available teachers have the same minimum, Python SystemRandom selects one of them.
-8. The chosen teacher is removed from the available set for that session, preventing two assignments in one session.
-9. The chosen teacher's current duty total is incremented. Later sessions therefore account for assignments earlier in the same generated schedule.
-10. Teachers never assigned in any session are returned in standby_teachers.
-
-If a session has more rooms than listed teachers, allocation fails with a validation error. A teacher can be assigned once per session and may work again in a later session.
-
-The algorithm makes a local fair choice at each room assignment. It is effective for balancing repeated duties when all assignments have equal weight, but it does not model teacher preferences, qualifications, absences, workload limits, room-specific constraints, or unequal duty weights.
-
-The fairness rule depends on exact teacher-name matching. For example, "Asha Patel" and "asha patel" are different names in the history map. Users should use consistent teacher names across exams and imports.
-
-8. API overview
-
-Health and frontend
-
-GET /health
-Returns a simple status response used to verify that the backend is running.
-
-GET /
-Returns the built frontend index when backend/static/index.html exists in the repository layout. In local Vite development the UI is served by Vite instead.
-
-Authentication and account
-
-POST /auth/register
-Creates a username and password account. Registration is limited to 5 requests per hour per client address.
-
-POST /auth/login
-Checks credentials and returns a signed access token. Login attempts are limited to 10 per minute per client address.
-
-GET /auth/me
-Returns details for the account associated with the Bearer token.
-
-GET /auth/history
-Returns the account workspace's teacher totals.
-
-POST /auth/history/record
-Records a completed exam and its teacher duty counts. Requires authentication.
-
-POST /auth/history/import
-Imports an XLSX or XLSM history workbook. Requires authentication, accepts up to 10 MB, and is limited to 5 requests per hour.
-
-GET /auth/history/export.xlsx
-Returns the account history as an Excel workbook. Requires authentication.
-
-Scheduling and files
-
-POST /allocate
-Accepts an allocation request and returns the generated schedule. Requires authentication.
-
-POST /import-list
-Accepts an XLSX or XLSM workbook up to 10 MB and returns non-empty rows from its first worksheet. It is used for selecting teacher or room columns.
-
-POST /export
-Accepts a reviewed schedule and returns a DOCX file.
-
-FastAPI provides interactive API documentation during local operation at http://localhost:8000/docs.
-
-9. File formats and validation
-
-Teacher and room list input
-
-- Pasted input accepts comma or newline separators.
-- CSV input is parsed in the browser, including quoted commas and escaped quote characters.
-- Excel list input accepts .xlsx and .xlsm. The backend reads the active first worksheet using openpyxl.
-- The list-file endpoint limits file size to 10 MB.
-- CSV values are treated as text. The UI can choose a detected column, but does not enforce a fixed CSV schema.
-
-History workbooks
-
-- History import only accepts .xlsx and .xlsm.
-- The first worksheet must have a recognized teacher-name heading and a recognized total-duty heading.
-- Accepted teacher headings include Teacher, Teacher Name, Staff, and Staff Name.
-- Accepted count headings include Total Duties, Duties, Duty Count, and Total Shifts.
-- Counts must be non-negative integers.
-- Imported values are added to current totals, not used as a replacement.
-- Exact workbook bytes are hashed with SHA-256 to prevent accidental re-import of the same file.
-
-DOCX output
-
-- Word output uses python-docx on the backend.
-- Browser fallback output uses the docx JavaScript package.
-- Both output room and shift assignments and standby names.
-- These two export implementations are separate and should be kept visually and semantically aligned when changed.
-
-10. Configuration and local data
-
-EXAMSCHEDULER.bat local development
-
-The one-click launcher does not require a .env file. With no DATABASE_URL set, the backend uses SQLite at data/exam_duty.db. The launcher requires Python 3 and Node.js with npm available on PATH. First setup normally needs network access to install packages.
-
-The app is bound to 127.0.0.1 by the launcher, so it is intended for the same computer rather than remote users on a network. The Vite development server uses port 5173 and the API uses port 8000.
-
-Relevant environment variables
-
-DATABASE_URL
-Optional database connection string. If omitted, local SQLite is used. Docker Compose sets this to a PostgreSQL connection string for its database service.
-
-APP_SECRET_KEY
-Secret used to sign JWT tokens. Development has a fallback key for ease of use. Production mode rejects the known development key.
-
-APP_ENV
-When set to production, authentication startup requires a non-default APP_SECRET_KEY and a PostgreSQL DATABASE_URL.
-
-CORS_ORIGINS
-Comma-separated list of allowed browser origins. The local default allows localhost and 127.0.0.1 on port 5173. CORS must allow the Authorization request header because the frontend sends the Bearer token to restore a saved session and access protected endpoints. If this header is blocked, the browser prevents the session check and the frontend returns to sign-in.
-
-RATE_LIMIT_STORAGE_URI
-SlowAPI storage configuration. Defaults to memory://. In-memory rate limits do not coordinate across multiple application processes.
-
-VITE_API_URL
-Optional frontend build-time API base URL. In Vite development the default is http://localhost:8000; in a production build the default is same-origin.
-
-Docker Compose configuration
-
-The Docker Compose setup is separate from EXAMSCHEDULER.bat. It expects a .env file with APP_SECRET_KEY and POSTGRES_PASSWORD, and can use APP_PORT and RATE_LIMIT_STORAGE_URI. It starts PostgreSQL with a persistent Docker volume and starts the application in production mode. Because the backend production guard requires PostgreSQL, the standalone SQLite development mode and production Docker mode have different database requirements.
-
-11. Security and privacy behavior
-
-- Passwords are hashed with the recommended pwdlib password hasher and Argon2 support.
-- Authentication tokens are JWTs signed with HS256 and expire after 12 hours.
-- The frontend stores the access token in localStorage. This is convenient but means browser-accessible JavaScript can access it.
-- Account, history, and allocation endpoints require a Bearer token where marked.
-- The local launcher binds services to loopback addresses. It is not a public website or cloud deployment.
-- Username and password recovery are not implemented.
-- Rate limiting uses client IP address and in-memory storage by default.
-- The project is not configured as a multi-instance or high-availability deployment.
-- The development secret must not be reused for a production deployment.
-- Database backups are not automatically created by the application.
-
-12. Tests and how to run them
-
-Backend tests use Python unittest and are in backend/tests.
-
-The tests cover:
-
-- Preference for teachers with lower historical totals.
-- Cumulative balancing across repeated exam runs.
-- Randomized equal-duty tie choices and assignments for a large staff list.
-- No duplicate teacher in a room assignment set for a session.
-- User creation, normalized usernames, sign-in, duplicate names, and rejected credentials.
-- History separation between distinct accounts.
-- Recording an exam and importing the same history workbook only once.
-- Migration of old email accounts to usable unique usernames.
-- Excel first-sheet parsing.
-- DOCX room/shift columns and standby list without a fairness audit matrix.
-
-To run tests from a terminal:
-
-1. Open a terminal in the backend directory.
-2. Activate the backend virtual environment or use its Python executable directly.
-3. Run python -m unittest discover -s tests.
-
-The frontend has an npm build and lint script in frontend/package.json. The build verifies that Vite can compile the UI. There is no dedicated frontend automated test suite listed in the current package scripts.
-
-13. Important limitations and trade-offs
-
-- The one-click launcher is Windows-specific. Linux and macOS users must start the backend and frontend using their platform's shell commands or use Docker.
-- The launcher needs local Python and Node.js installations. On first run it also needs package download access.
-- The local database belongs to the machine and project folder. Moving the repository without copying data/exam_duty.db does not move local account history.
-- A local SQLite database is appropriate for a single local process and modest use. Concurrent multi-user deployments should use a managed or self-hosted PostgreSQL database with backups.
-- The batch file runs the development servers with reload enabled. It is not a Windows service installer and is not intended as a hardened production deployment.
-- The current local configuration runs frontend and backend on separate ports. A built frontend served by FastAPI is supported in the Docker image.
-- The fairness algorithm has no constraints for teacher availability, qualifications, maximum workload, or preferences.
-- History depends on exact teacher names. Inconsistent spelling or capitalization can split one real teacher into multiple totals.
-- Workbooks are limited to 10 MB. The list importer reads the first worksheet; history import also reads the first worksheet.
-- The history importer adds totals. It does not overwrite or reconcile totals with an external source.
-- Account history is tied to a username. If a user forgets the credentials, there is no built-in recovery or migration from the old account.
-- Rate-limit storage is in-memory unless configured otherwise; it is intended for one app process.
-- The backend requirements use minimum version ranges rather than exact pins. Recreating the environment later may install newer compatible package versions.
-- The API's session dates and time slots are strings. Formal date parsing, time-zone treatment, and overlap detection are not currently implemented.
-- The scheduler's random tie breaking means the same input can produce different equally fair schedules. This is intentional.
-
-14. Difficult engineering problems and design decisions
-
-Fairness across multiple exams
-
-Random selection on its own can repeatedly assign the same teachers. The allocator uses saved historical totals as the primary selection value, then adds duties already assigned during the current generation run. Randomness is only used to select among equal minimum totals. The application stores history only after the user explicitly confirms that an exam has been completed, preventing a generated but unused draft from affecting future exams.
-
-Keeping one teacher per session
-
-The same teacher should not be assigned to two rooms in a single time slot. The allocator maintains an assigned-in-session set and removes selected teachers from that session's candidates. This allows a teacher to work in another session while preventing simultaneous duplicate room assignments.
-
-Allowing schedule edits without undoing fairness
-
-Manual swaps can undermine a balanced generated schedule. The dashboard recalculates totals after a proposed change and compares the spread between the highest and lowest cumulative totals. It rejects a change if that spread becomes larger. This is a simple guardrail; it is not a complete optimization of all possible schedules.
-
-Supporting both CSV and Excel
-
-CSV can be handled directly in the browser without uploading it. Excel parsing uses openpyxl on the API because browser support for workbook parsing is not part of the current stack. Both paths are normalized into rows, then the user chooses the column to apply.
-
-Preventing duplicate history imports and exam logs
-
-History imports add to existing totals, so importing the same file twice would inflate totals. The backend hashes workbook bytes and stores the hash per school workspace. Completed exams use a unique workspace and exam identifier constraint to reject duplicate completion records.
-
-Operating without hosted services
-
-The development launcher uses loopback addresses and a local SQLite database. It avoids cloud URLs and external database credentials. The trade-off is that history is stored on that computer and other computers cannot use the app unless a separate private hosting setup is configured.
-
-15. Interview questions and suggested answers
-
-Question: What problem does this project solve?
-
-Answer: It reduces manual work when creating exam invigilation plans. It maps teachers to rooms for each exam session, provides a standby list, and uses earlier duty totals to help distribute repeated assignments fairly.
-
-Question: Describe the architecture.
-
-Answer: The frontend is a React application served by Vite in local development. It sends JSON and file-upload requests to a FastAPI backend. The backend validates schemas with Pydantic, runs allocation logic, and stores accounts and history through SQLAlchemy. SQLite is used by the local launcher. The app can also be built into a single service with Docker, using PostgreSQL in Docker Compose.
-
-Question: Walk through a schedule generation request.
-
-Answer: The user enters teachers, rooms, and sessions. The frontend sends an AllocationRequest to POST /allocate with a Bearer token. The backend loads the account's history totals, runs generate_allocation, and returns an AllocationResponse. The frontend displays the room chart and standby lists.
-
-Question: How does the algorithm promote fairness?
-
-Answer: For each room, it assigns the available teacher with the lowest sum of saved historical duties and duties assigned earlier in the current generation request. If several teachers tie, it chooses randomly using SystemRandom. A teacher assigned to a room is removed from that session's candidate set.
-
-Question: Is this a globally optimal scheduler?
-
-Answer: No. It is a greedy heuristic that makes a fair local choice at each assignment. It does not search all schedules or model preferences, qualifications, absences, or weighted assignments. A future version could use constraint programming or an integer optimization model if those constraints become necessary.
-
-Question: Why randomize ties?
-
-Answer: Equal historical totals represent equally eligible candidates. Random tie breaking avoids always favoring the first name in the input list while preserving the same minimum-total fairness rule.
-
-Question: How are duplicate assignments within a session prevented?
-
-Answer: The allocator tracks assigned teachers for the current session and removes each chosen teacher from that session's candidate list. It also rejects a session when there are fewer teachers than rooms.
-
-Question: What happens if the number of rooms exceeds the number of teachers?
-
-Answer: Allocation raises a ValueError that the API converts into an HTTP 400 response. The frontend displays the returned error.
-
-Question: How does the application keep fairness after a manual swap?
-
-Answer: The dashboard counts current assignments, adds stored history totals, and computes the max-minus-min spread. It permits a swap only when the proposed spread does not exceed the existing spread.
-
-Question: Why is exam history saved only after review?
-
-Answer: A generated schedule may be only a draft. Saving automatically would incorrectly affect future allocations if the schedule was never used. The user must explicitly mark the exam complete.
-
-Question: What does the database store?
-
-Answer: It stores users and password hashes, school workspaces, cumulative teacher totals, completed exam records, per-exam duty contributions, and hashes of imported workbooks.
-
-Question: How are passwords handled?
-
-Answer: Passwords are hashed with pwdlib using its recommended password hashing configuration, which includes Argon2 support. Login verifies the supplied password against the stored hash. The raw password is not stored.
-
-Question: How does authentication work?
-
-Answer: Successful registration or login returns a signed HS256 JWT with a 12-hour expiration. The React app stores it in localStorage and sends it in an Authorization Bearer header on protected calls.
-
-Question: What is a JWT and why is it used here?
-
-Answer: A JSON Web Token is a signed token containing claims such as a user identifier and expiration time. The API can verify its signature and expiry without creating a server-side session record for every request. The signing key must be secret and stable.
-
-Question: What are the security limitations of this authentication design?
-
-Answer: The token is kept in localStorage, which is accessible to JavaScript running in the page. The project has no recovery flow, uses an in-memory rate limiter by default, and requires a proper secret outside development. A hardened public deployment would need a security review, secure transport, backups, shared rate-limit storage, and careful browser threat mitigation.
-
-Question: Why use Pydantic?
-
-Answer: Pydantic validates and converts JSON request data into typed Python models. It provides clear schema definitions for sessions, assignments, and allocation requests, and FastAPI uses these schemas for API documentation.
-
-Question: Why use SQLAlchemy?
-
-Answer: SQLAlchemy provides a consistent ORM and database engine interface. It allows the app to use SQLite locally and PostgreSQL under Docker Compose while keeping account and history operations expressed as Python queries.
-
-Question: Why use SQLite locally and PostgreSQL in Docker?
-
-Answer: SQLite makes one-computer setup easy because it requires no database server. PostgreSQL is used by the container-based production-style configuration because it supports a dedicated database service and persistent volume. SQLite is not intended for scaling concurrent users.
-
-Question: How are spreadsheet uploads protected?
-
-Answer: The upload endpoints accept specific Excel extensions and reject files above 10 MB. The history importer validates required headers, integer duty totals, non-negative values, and duplicate workbook hashes. File parsing errors are returned as HTTP errors.
-
-Question: How is a repeated history workbook detected?
-
-Answer: The backend calculates a SHA-256 hash over the uploaded bytes and stores it for the account workspace. A later upload with the same bytes is rejected.
-
-Question: Why use both server-side and client-side DOCX export?
-
-Answer: The backend exporter is the primary path and uses python-docx. A browser implementation using the docx JavaScript package is available as a fallback if the server export request fails. Both paths must be maintained to keep output consistent.
-
-Question: How does the project support local-only operation?
-
-Answer: The Windows launcher binds the development servers to 127.0.0.1, uses a local SQLite file by default, and opens a localhost URL. It does not require a public URL or cloud database for ordinary local development.
-
-Question: What does Docker add?
-
-Answer: Docker builds the React frontend into static files, installs the backend, and lets FastAPI serve the built frontend. Docker Compose additionally starts PostgreSQL with a persistent volume. It offers a self-hosting route, but it is separate from the one-click Windows development launcher.
-
-Question: What is CORS and why is it configured?
-
-Answer: Cross-Origin Resource Sharing is a browser security mechanism for requests between different origins. In local development the frontend is on port 5173 and the API is on port 8000, so the backend permits the configured local frontend origins.
-
-Question: How would you test the allocator?
-
-Answer: Unit tests should cover lower-history preference, one assignment per teacher per session, the room-to-teacher capacity error, standby counts, randomized ties, and cumulative fairness over repeated exam runs. The repository has tests for these main cases.
-
-Question: What does the current test suite not prove?
-
-Answer: Unit tests do not prove that every browser interaction works, that the app is secure under hostile network conditions, or that every possible schedule is globally optimal. The current repository has backend unit tests but no dedicated frontend test suite.
-
-Question: What happens if a teacher's name changes between imports?
-
-Answer: The system treats it as a different exact name and maintains a separate total. Stable spelling and capitalization are necessary. A future improvement could add canonical teacher IDs or an alias/merge interface.
-
-Question: What would you improve next?
-
-Answer: Potential improvements include formal date/time validation, availability and qualification constraints, teacher IDs to avoid name mismatches, frontend automated tests, database backup and restore procedures, exact dependency lock for Python, configurable secure token handling, persistent shared rate-limit storage, and stronger production deployment hardening.
-
-Question: Why is the backend environment not exactly reproducible?
-
-Answer: The Python requirements specify minimum versions rather than exact pins and do not currently use a Python lockfile. The frontend does use package-lock.json with npm ci. Exact Python pins and a tested runtime matrix would improve reproducibility.
-
-16. Demonstration checklist
-
-- Run EXAMSCHEDULER.bat and wait for the browser to open.
-- Create an account with a valid username and a password of at least 12 characters.
-- Create a schedule with at least as many teachers as rooms.
-- Generate a schedule and show one teacher per room per session.
-- Point out that teachers with lower prior totals receive assignment priority.
-- Demonstrate standby teachers and an eligible substitution.
-- Demonstrate an exchange that preserves or improves the duty-count spread.
-- Export the DOCX and inspect its room, shift, and standby sections.
-- Mark the exam complete and verify that teacher totals appear in history.
-- Export the history workbook.
-- Explain that local history is stored in data/exam_duty.db and is not shared with another computer automatically.
-
-17. Summary
-
-Exam Duty Allocator is a local-first full-stack application. React and Vite provide the browser interface. FastAPI and Pydantic expose validated API operations. A greedy randomized tie-break scheduler uses saved duty totals to balance assignments across sessions and exams. SQLAlchemy stores account-scoped history in SQLite for local use and PostgreSQL for Docker Compose. Excel and CSV imports feed the scheduler, and the application generates compact DOCX schedules with standby lists. The one-click Windows batch file automates the normal local development startup.
-
-The central engineering trade-off is simplicity versus constraint completeness. The project prioritizes an easy local workflow and transparent duty balancing. It does not yet solve every real-world scheduling constraint or provide cloud-scale account sharing, automatic backups, or account recovery.
-
-18. Beginner glossary
-
-Application
-
-A program that performs a task for a person. This project is a web application: the interface appears in a browser, while local programs provide the interface and data-processing services.
-
-Frontend
-
-The part of the application that the user sees and interacts with. Here it consists of HTML, CSS, JavaScript, and React components. It collects inputs, renders results, and sends requests to the backend.
-
-Backend
-
-The part that runs application rules and provides API endpoints. Here it is a Python application using FastAPI. It validates schedule requests, performs assignments, checks user tokens, reads and writes records, and creates downloadable files.
-
-API
-
-An agreed set of routes through which one program can request work from another. For example, the frontend sends a POST request to /allocate and receives schedule data from the API.
-
-Server
-
-A running program that listens for requests. The backend is a server while Uvicorn is running. The word server does not necessarily mean a remote computer; this project's development server runs on the user's own computer.
-
-Host and localhost
-
-The host is the computer running the program. Localhost and 127.0.0.1 refer back to that same computer. The local launcher binds both processes to 127.0.0.1, rather than making them listen on every network interface.
-
-Port
-
-A numbered endpoint used by programs on one computer to distinguish network services. The frontend uses port 5173 and the backend uses port 8000. A port conflict means another program is already listening on the same port.
-
-HTTP
-
-The request-and-response protocol used by a browser and a web API. A request contains a method, a URL, headers, and sometimes a body. A response contains a status code, headers, and sometimes a body.
-
-JSON
-
-A text format for structured data. The frontend and backend use JSON to communicate schedule fields such as teacher lists, rooms, sessions, assignments, and totals.
-
-Dependency or package
-
-Reusable software written by another team and installed into a project. FastAPI, React, and openpyxl are examples. The repository lists the packages it needs; the local machine downloads and installs them into the appropriate environment.
-
-Runtime
-
-The program that executes source code. Python executes backend Python files. Node.js executes JavaScript tools such as npm and Vite during development and building. The browser executes the frontend JavaScript.
-
-Build
-
-A preparation step that converts source code into files suited for delivery. Vite's build script bundles and optimizes the frontend into frontend/dist. The development launcher uses Vite's development server instead of requiring a production build.
-
-Database
-
-An organized persistent store for structured records. This project stores account and duty-history data in a database rather than keeping it only in temporary browser state.
-
-ORM
-
-Object Relational Mapper. SQLAlchemy is the ORM used here. It maps Python classes and objects to database tables and rows, and lets application code issue database queries through Python APIs.
-
-Schema
-
-The shape and rules of data. Pydantic request models define the JSON shape the API accepts. Database table definitions define the fields stored persistently.
-
-Environment variable
-
-A named setting passed to a running process from its environment. Database connection strings and signing secrets can be configured this way without hard-coding them into application logic. A .env file is commonly used by Docker Compose to provide these settings locally.
-
-Command prompt or terminal
-
-A text interface for running commands. The Windows launcher automates the commands that would otherwise be typed manually into multiple terminal windows.
-
-19. Why the project uses Python 3
-
-Python 3 is the programming language used for the backend. It is a modern, actively supported version of Python and supports the libraries selected for this project. Python 2 is obsolete and is not compatible with this code and its current packages.
-
-Python is a suitable choice here because:
-
-- The scheduler algorithm can be expressed clearly using lists, dictionaries, sets, and loops.
-- FastAPI and Pydantic make HTTP APIs and input validation direct to implement.
-- SQLAlchemy provides database access without writing every query as handwritten SQL.
-- python-docx creates Word files from Python objects.
-- openpyxl reads and writes Excel workbooks.
-- Python unittest is included in the standard Python installation for the backend tests.
-
-Python 3 is a runtime requirement, not a feature that users need to understand to operate the app. The user double-clicks the batch file, and the batch file calls Python to start the backend. Python must still be installed on the machine. The current launcher checks that a command named python exists; it does not install Python or enforce a particular patch version.
-
-The Dockerfile uses Python 3.11 for the container build. The local launcher uses the Python installation found on the computer. Use a currently supported Python 3 release with the required packages. The repository's backend requirements use minimum version declarations, so package compatibility should be checked if using a future Python release.
-
-Python source files use the .py extension. The API package is backend/app. The main module is app.main, which is why the server command is uvicorn app.main:app when the working directory is backend.
-
-20. Why the project uses JavaScript, React, Node.js, and Vite
-
-JavaScript is the language the browser runs directly. It is used for the frontend application. JSX is JavaScript syntax that allows React UI structures to be written in a tag-like form. The project uses JSX files such as App.jsx; it does not use TypeScript.
-
-React breaks the interface into components. DataEntryForm handles inputs, Dashboard displays and edits schedules, and App coordinates navigation and API requests. React state stores the current form values, token, account, schedule, error messages, and history view. Updating state tells React to redraw the part of the page that depends on it.
-
-Node.js is a JavaScript runtime installed on the computer. During local development, it runs npm and the Vite development tooling. The browser, not Node.js, renders the normal frontend UI.
-
-npm is the package manager bundled with Node.js. It reads frontend/package.json for package names and scripts. npm ci installs the exact frontend dependency versions recorded in frontend/package-lock.json. The lock file makes the frontend installation more repeatable than relying only on loose version ranges.
-
-Vite is the development server and build tool. In this project it:
-
-- Serves frontend source files at port 5173 during development.
-- Supports fast refresh when frontend source files are edited.
-- Runs npm run build to create optimized static files in frontend/dist.
-- Provides the frontend script module entry point from frontend/index.html.
-
-The local launcher checks for frontend/node_modules/vite/bin/vite.js. If it does not exist, the launcher runs npm ci in the frontend folder. The launcher does not check every frontend package separately.
-
-21. Why HTML, CSS, Tailwind CSS, and PostCSS are used
-
-HTML describes the basic page structure. frontend/index.html contains the root element into which React renders the application and loads frontend/src/main.jsx.
-
-CSS controls visual presentation, including colors, spacing, fonts, focus states, and layout. frontend/src/index.css contains shared light-theme styling and imports Tailwind's generated utility layers.
-
-Tailwind CSS provides small utility classes for common visual rules. Components combine classes to describe layout, spacing, color, and responsive behavior. The project also has normal CSS overrides for shared styles.
-
-PostCSS is a CSS processing tool used in the frontend build pipeline. The PostCSS configuration loads Tailwind CSS and Autoprefixer. Autoprefixer adds browser-specific CSS prefixes where needed.
-
-Lucide React provides icons as React components. These are decorative and do not implement the scheduling logic.
-
-The HTML entry point links to IBM Plex Sans and IBM Plex Mono from Google Fonts. The app's data and API operations run locally, but the browser may make an external request to load these fonts when internet access is available. CSS fallback fonts keep the interface readable if they cannot load. These are external font resources, not a hosted backend or public app URL.
-
-22. What a .bat file is and what this launcher does
-
-A .bat file is a Windows batch script. It contains Windows command-prompt commands that are executed in order. EXAMSCHEDULER.bat is a convenience launcher; it is not a separate compiled application and it does not contain the scheduler algorithm.
-
-The user only needs to double-click EXAMSCHEDULER.bat in the project folder. The following is the execution sequence. Exact durations depend on the computer and internet connection.
-
-Phase 1: Find the project folders
-
-The command %~dp0 expands to the directory where EXAMSCHEDULER.bat is stored. This makes the launcher work when the project folder is moved, including when its path contains spaces. The script builds absolute paths to backend and frontend from that root.
-
-Phase 2: Check required tools
-
-where.exe python checks whether the Python command is available on PATH. where.exe npm.cmd checks whether npm is installed and available. If either command is missing, the script explains the missing prerequisite, pauses so the message can be read, and exits without starting the app.
-
-The launcher does not install Python or Node.js. Install these runtimes separately if the checks fail. Restarting the terminal or Windows may be necessary after changing PATH.
-
-Phase 3: Prepare Python's isolated environment
-
-If backend/venv/Scripts/python.exe does not exist, the launcher runs python -m venv backend/venv. This creates a virtual environment for this project's Python packages. The environment keeps project dependencies separate from globally installed Python packages and other projects.
-
-The script then runs the virtual environment's Python with pip install -r backend/requirements.txt. pip is Python's package installer. The requirements file tells pip which packages the backend needs. Version entries use greater-than-or-equal constraints, so pip installs a version that satisfies each minimum.
-
-This command is run every time the batch file is started. pip checks whether installed packages satisfy the requirements and normally does not reinstall already satisfactory packages. If packages are absent or outdated relative to their declared minimums, pip may contact the Python package index and install them.
-
-Phase 4: Prepare JavaScript dependencies
-
-If Vite is not present in frontend/node_modules, the launcher changes into the frontend directory and calls npm ci. npm ci removes and recreates the dependency installation from package-lock.json. It can require internet access on the first setup.
-
-Phase 5: Start the backend window
-
-The start command opens a separate command window with the backend directory as its working directory. It runs the Python executable inside backend/venv and starts Uvicorn with app.main:app. The --reload option watches backend source files and restarts the development server after code changes. The --host 127.0.0.1 setting keeps this development server on the local computer. The API listens on port 8000.
-
-The colon in app.main:app separates the Python module from the FastAPI variable. app.main means load backend/app/main.py. The final app means use the FastAPI object named app inside that module.
-
-Phase 6: Start the frontend window
-
-The second start command opens another command window with the frontend directory as its working directory. It runs npm run dev -- --host 127.0.0.1. The first -- starts an npm script; the second -- passes the remaining option to Vite. Vite listens on port 5173.
-
-The /k option tells the Windows command processor to keep that frontend window open after starting the command. The backend window is also retained by the start process. Keeping these windows visible lets the user read startup errors and request logs.
-
-Phase 7: Open the browser
-
-The launcher waits two seconds and asks Windows to open http://localhost:5173 in the default browser. Startup speed can vary. If the browser opens before Vite is ready, wait a few seconds and refresh.
-
-To stop the local application, close the backend and frontend command windows. The browser tab itself does not run the backend. Keeping the terminal windows open is necessary while using the app.
-
-23. Minute-by-minute local run guide
-
-Before the first run
-
-1. Obtain the project files on the computer and keep the folder structure intact.
-2. Install Python 3 and Node.js. During installation, enable the option that makes their commands available on PATH where the installer offers it.
-3. Confirm that npm is installed with Node.js. The project launcher checks for npm.cmd.
-4. Internet access is normally needed the first time so pip and npm can download project dependencies.
-5. Do not move EXAMSCHEDULER.bat away from the repository. It locates backend and frontend relative to its own location.
-
-First launch
-
-1. Open the repository folder in File Explorer.
-2. Double-click EXAMSCHEDULER.bat.
-3. If Windows shows a security prompt, verify that the file came from the expected project repository before allowing it to run.
-4. A command window checks Python and npm. If a prerequisite is missing, install it and run the batch file again.
-5. The script creates backend/venv if it is not already present.
-6. pip reads backend/requirements.txt and installs the backend libraries.
-7. npm ci installs frontend packages if the Vite dependency folder is missing.
-8. Two command windows appear, one for the API and one for the UI. Wait for their startup output.
-9. The browser opens the frontend. If it reports that the site cannot be reached, confirm the two terminal windows remain open and then refresh.
-10. On the sign-in page, create an account. Account creation requires a username with at least 3 valid characters and a password with at least 12 characters.
-11. Continue to the home page, create a schedule, review it, export it, and mark it complete if it should affect future duty allocation.
-
-Later launches
-
-1. Double-click the same EXAMSCHEDULER.bat.
-2. Existing virtual-environment and frontend packages are reused when present.
-3. The frontend keeps the token in browser localStorage until it expires or the user signs out. A valid token is checked when the app loads.
-4. History remains in the SQLite file unless the user deletes or moves that file.
-
-Important: the launcher does not back up the database. Before reinstalling Windows, deleting the project, or changing computers, copy data/exam_duty.db if local account history must be retained. Passwords and duty records are both stored in that database, with passwords stored as hashes.
-
-24. What Python does when the backend starts
-
-Uvicorn imports app.main:app. Importing main imports the API models, scheduler, exporter, authentication router, database objects, and limiter.
-
-The database module reads DATABASE_URL. If it is unset, it creates the data folder and constructs a SQLite URL pointing to the project-root data/exam_duty.db file.
-
-The FastAPI module creates its application object, creates tables from the declared SQLAlchemy models, performs the legacy username migration, includes the account router, configures the rate limiter, and sets CORS rules.
-
-The legacy migration checks whether the user table has a username column. For old email-based rows that do not have a username, it derives a lower-case username from the email's local part, resolves conflicts with a legacy suffix, and adds a unique index.
-
-Uvicorn then listens for HTTP requests. A successful GET /health response indicates that the API process is running. It does not by itself prove every database operation, browser feature, or document download works.
-
-In local Vite development, FastAPI normally serves API responses only. The React UI comes from Vite. In a Docker build, the Dockerfile copies frontend/dist into /app/static, and FastAPI can serve that static site from its root route.
-
-25. What happens inside the frontend
-
-The browser receives frontend/index.html from Vite. The HTML contains a div with the id root and loads frontend/src/main.jsx.
-
-main.jsx imports React, ReactDOM, App.jsx, and the project stylesheet. ReactDOM creates the React root at the HTML element and renders App.
-
-App.jsx decides what to display based on state:
-
-- If the token is still being checked, it shows a loading state.
-- If there is no valid account, it shows sign-in or registration.
-- If the user has not selected another area, it shows the home screen.
-- If the user starts a new schedule, it shows DataEntryForm.
-- If a schedule exists, it shows Dashboard.
-- If the user opens history, it shows the saved totals and import/export controls.
-
-DataEntryForm keeps inputs in React state. On submit it normalizes the text into arrays and calls the callback supplied by App.
-
-App serializes schedule inputs with JSON.stringify and uses fetch to send HTTP requests. For files, it uses FormData so the browser can send multipart form data. The access token is added to protected requests in the Authorization header.
-
-Dashboard receives schedule data as props. It creates a table from sessions and rooms. React keys identify rows and buttons. On a swap it calculates a new schedule and calls the update callback, which replaces App's schedule state.
-
-The browser's localStorage survives browser refreshes, unlike ordinary React state. The app uses it for the access token. It does not use localStorage to save the generated schedule or duty history.
-
-26. What happens during one API request
-
-Example: generating an allocation
-
-1. The user presses the generate button.
-2. DataEntryForm prevents the browser's default page submission and creates a JavaScript object containing school name, exam name, sessions, teachers, and rooms.
-3. App receives the object and sets its loading state.
-4. App converts the object to JSON text and calls fetch for POST /allocate.
-5. The browser includes the local API address and the Authorization Bearer token.
-6. The browser may send a CORS preflight request because the frontend and backend use different ports.
-7. FastAPI routes the request to allocate_duties and validates JSON against AllocationRequest.
-8. FastAPI's dependency mechanism resolves the current user from the JWT and opens a database session.
-9. The route loads that user's history totals. Client-submitted history totals are replaced by the database values.
-10. generate_allocation validates the teacher, room, and session inputs and selects assignments.
-11. FastAPI serializes the AllocationResponse model to JSON and sends it with a success status.
-12. The frontend parses the JSON, clears the loading state, stores the allocation in React state, and displays Dashboard.
-
-HTTP status codes used by the API include:
-
-- 200 for successful requests.
-- 201 when a new account is created.
-- 400 for invalid data or unsupported workbook contents in relevant routes.
-- 401 when credentials or an access token are invalid or missing.
-- 409 for duplicate usernames, completed exam IDs, or imported workbook hashes.
-- 413 when a workbook exceeds the upload size limit.
-- 422 when request validation fails.
-- 500 when an unexpected server error occurs in routes that convert exceptions to HTTP responses.
-
-The frontend checks response.ok. For non-success responses it tries to display the detail or message from the JSON response.
-
-27. Python and JavaScript data types
-
-Python types used in the backend
-
-str
-Text, such as teacher names, room numbers, date labels, session IDs, and exam names.
-
-int
-Whole numbers, such as teacher duty totals and database primary keys.
-
-bool
-True or false values, such as the legacy verified field.
-
-list
-Ordered collections, such as rooms, teachers, sessions, and assignments.
-
-dict
-Key-value mappings, such as teacher name to historical duty total.
-
-set
-An unordered collection of unique values. The allocator uses sets to check whether a teacher already has a duty in the current session.
-
-Optional[str] or str | None
-A value that can be a string or no value. Session IDs and session names are optional in the request schema.
-
-Mapped[int] and Mapped[str]
-SQLAlchemy's typed declarations for columns in database models.
-
-datetime
-Used for timestamps such as when an exam is marked complete. Session exam dates themselves are currently plain strings.
-
-BytesIO
-An in-memory binary stream used while constructing Excel and DOCX downloads without first writing a temporary output file.
-
-JavaScript types used in the frontend
-
-string
-Text, including all teacher and room names and date/time fields.
-
-number
-Counts and selected array indices.
-
-boolean
-Loading, success, and toggle flags.
-
-array
-Lists of teachers, rooms, sessions, assignments, and table rows.
-
-object
-Structured records such as an allocation, session, account, and imported worksheet.
-
-Map and Set
-Collections used in browser code to group sessions by date and track unique rooms or assignments.
-
-null
-An explicit empty value used when a second session or selected assignment does not exist.
-
-JSON itself has no special date type. Even when a value looks like a date, it travels over the API as a string until the application explicitly parses it.
-
-28. Why Docker is present and what its files do
-
-Docker packages an application and its runtime dependencies into an image. Running an image creates a container, which is an isolated process with its own filesystem view and network configuration. Docker helps make the application environment more consistent between computers. It does not automatically make a service public on the internet.
-
-The Dockerfile is a list of image build instructions. This project's Dockerfile uses two build stages.
-
-Frontend build stage
-
-1. Start from a Node 22 Alpine Linux image.
-2. Copy frontend/package.json and package-lock.json into the build directory.
-3. Run npm ci to install the frontend packages.
-4. Copy the remaining frontend source.
-5. Run npm run build to create frontend/dist.
-
-Backend runtime stage
-
-1. Start from a Python 3.11 slim image.
-2. Set /app as the working directory.
-3. Copy backend/requirements.txt and install backend packages with pip.
-4. Copy backend/app into /app/app.
-5. Copy the frontend build output into /app/static.
-6. Set the default application port to 8000.
-7. Start Uvicorn listening on 0.0.0.0 inside the container.
-
-The container listens on all of its own network interfaces so Docker can connect to it. This is different from EXAMSCHEDULER.bat, which binds to the host computer's loopback address.
-
-29. What docker-compose.yml and YAML are for
-
-YAML is a human-readable text format for structured configuration. It uses indentation to show which values belong under which key. It is not the programming language that implements the scheduler.
-
-docker-compose.yml is read by Docker Compose. It describes which containers to build or run and how they connect. The project declares two services.
-
-db service
-
-- Uses the postgres:16-alpine image.
-- Reads the database username, password, and database name from configuration.
-- Uses a named volume called exam-duty-data to keep database files when the container is stopped or recreated.
-- Runs pg_isready as a health check so Compose can determine when PostgreSQL is ready.
-
-app service
-
-- Builds the app image using the root Dockerfile.
-- Publishes the container's port 8000 through a host port, which defaults to 8000.
-- Passes APP_ENV, APP_SECRET_KEY, DATABASE_URL, RATE_LIMIT_STORAGE_URI, and PORT to the backend.
-- Waits for the database health check before starting.
-- Uses a restart policy and an HTTP health check.
-
-The database host in DATABASE_URL is db. Docker Compose places services on a private network where the service name resolves to the other container. The host application must not use db as its database host when running outside Docker.
-
-The volume is what makes the database survive ordinary container removal. A named volume is separate from the app image. Deleting the volume deletes the persistent database contents, so volume cleanup must be deliberate.
-
-The .env.example file is a template only. To use Docker Compose, create a file named .env beside docker-compose.yml and replace the sample APP_SECRET_KEY and POSTGRES_PASSWORD values. Do not share or commit a real .env file. The repository .gitignore excludes .env.
-
-Docker Compose is optional. The everyday Windows path is to double-click EXAMSCHEDULER.bat. The batch launcher does not invoke Docker Compose and does not require Docker Desktop.
-
-30. Configuration and dependency files explained
-
-frontend/package.json
-
-Lists frontend package names, project metadata, and npm commands. For example, npm run dev starts Vite, npm run build creates a production frontend build, and npm run lint invokes ESLint.
-
-frontend/package-lock.json
-
-Records exact resolved frontend dependency versions and dependency relationships. npm ci uses this file for reproducible package installation.
-
-backend/requirements.txt
-
-Lists Python packages and minimum supported versions. The current file does not lock every exact version. pip reads this file during launcher setup.
-
-.env.example
-
-Shows example environment variable names for Docker Compose. Its values are placeholders, not production secrets. Copying it to .env is only needed for the Docker Compose setup, not for the normal Windows batch launcher.
-
-.gitignore
-
-Tells Git which generated or private files should not be tracked. This project ignores virtual environments, node_modules, frontend build output, Python cache files, .env files, database files, and downloaded DOCX exports. This keeps large dependencies, local data, and secrets out of ordinary Git commits.
-
-.dockerignore
-
-Controls which files are sent to Docker during image builds. Excluding virtual environments, package installations, local data, and environment files keeps image builds smaller and reduces the chance of copying private local files into an image.
-
-31. Network, local hosting, and external resources
-
-The local batch launcher uses:
-
-- Frontend: 127.0.0.1 on port 5173.
-- Backend: 127.0.0.1 on port 8000.
-- Database: a SQLite file on the same machine.
-
-This arrangement means a person at the same computer can use the app in a browser. It is not a public URL, and it does not create shared accounts for users on different computers.
-
-The application still needs internet access during first-time package installation unless all required package files are already cached. The page also references Google Fonts for IBM Plex Sans and IBM Plex Mono. If internet access is unavailable, the page uses its fallback sans-serif and monospace fonts. These facts do not mean the API or database is hosted remotely.
-
-Docker Compose maps port 8000 from the container to the host. Depending on Docker and firewall configuration, a published port may be reachable from other devices on the same private network. If only the same-computer user should access a Docker deployment, review the port binding and host firewall settings. Do not expose it to the public internet without deployment and security work.
-
-32. Development workflow: how to change the project safely
-
-Changing scheduler behavior
-
-1. Update or add a Pydantic input or output type in backend/app/models.py if the API data shape changes.
-2. Implement the algorithm change in backend/app/allocator.py.
-3. Keep the endpoint in backend/app/main.py focused on validation, history loading, calling the allocator, and translating errors.
-4. Add or update tests in backend/tests/test_allocator.py.
-5. Run the backend tests from the backend folder.
-6. Check that Dashboard still understands the response properties.
-
-Changing an API route
-
-1. Define request and response schemas in backend/app/models.py or backend/app/auth.py for authentication-related data.
-2. Implement route behavior in backend/app/main.py or the account router in backend/app/auth.py.
-3. Add authentication dependencies for private account or history data.
-4. Consider upload limits, response status codes, rate limits, and database transactions.
-5. Add a focused backend test.
-6. Update this document if the documented API behavior changes.
-
-Changing the user interface
-
-1. Find the component that owns the relevant area: DataEntryForm for schedule inputs, Dashboard for generated schedules, or App for navigation and API workflow.
-2. Use React state for values that need to change and render again.
-3. Keep API calls and shared account state coordinated through App.
-4. Test the feature in the browser using EXAMSCHEDULER.bat.
-5. Run npm run build from the frontend directory to catch compilation errors.
-6. Run npm run lint from the frontend directory if lint validation is needed.
-
-Changing database fields
-
-1. Update the SQLAlchemy model and all code that reads or writes the field.
-2. Decide how existing SQLite and PostgreSQL databases will acquire the new field. create_all creates missing tables but does not automatically migrate every changed column.
-3. Add a migration or explicit compatibility logic for existing databases.
-4. Add tests against a temporary SQLite database.
-5. Back up any real database before applying a schema change.
-
-Changing exports
-
-The server exporter is backend/app/exporter.py. The browser fallback is frontend/src/utils/docxExporter.js. Update both when a change should appear in either implementation. Add a regression test for the server output and manually test the browser fallback where possible.
-
-33. Troubleshooting guide
-
-The launcher says Python was not found
-
-Install Python 3. Reopen the project folder and try again. If Python is installed but the message persists, add Python to PATH or configure the installation so the python command is available.
-
-The launcher says Node.js or npm was not found
-
-Install Node.js, which includes npm. Reopen the terminal or restart Windows so PATH updates are visible. Run the launcher again.
-
-pip fails while installing
-
-Check internet access, Python version compatibility, disk space, and the error text in the backend window. Confirm backend/requirements.txt can be read. A corporate proxy or firewall may block the package index.
-
-npm ci fails
-
-Check internet access and Node.js version. Confirm frontend/package-lock.json and frontend/package.json exist. Keep the error window open so the package name and failure reason can be read.
-
-Browser says localhost refused the connection
-
-Check that both command windows remain open. Look for an import error or a port-in-use message. The API should respond at http://localhost:8000/health and Vite should respond at http://localhost:5173. If startup is still in progress, wait and refresh once.
-
-Port 5173 or 8000 is already in use
-
-Close the other application using that port, or stop its process using its own supported controls. Do not randomly terminate unrelated processes. The frontend port is configured in frontend/vite.config.js; the API port appears in EXAMSCHEDULER.bat.
-
-Sign-in says the credentials are wrong
-
-Confirm the exact username and password. Usernames are normalized to lowercase. There is no password-reset feature. Creating a different username creates a separate history workspace and will not recover the previous one.
-
-Sign-in returns to the login screen or the account page does not load
-
-Keep the backend and frontend command windows open, then restart EXAMSCHEDULER.bat to ensure both services are running the current project version. The browser needs access to the API, and backend CORS must allow the frontend origin and the Authorization header. The frontend keeps the signed access token in localStorage; the backend keeps the password hash and account in data/exam_duty.db. Check the backend window for startup or database errors. After a successful sign-in, choose Create a duty schedule on the home screen to open the scheduling form.
-
-A schedule does not use expected historical totals
-
-Confirm the exam was marked complete, confirm the correct username is signed in, and check that teacher names match exactly. An imported history workbook adds totals to existing values; it does not replace them.
-
-An Excel list is rejected
-
-The list importer accepts .xlsx and .xlsm, reads the first worksheet, and has a 10 MB size limit. Check that the workbook is valid and that the teacher or room name column is selected.
-
-An Excel history workbook is rejected
-
-The first worksheet must include a recognized teacher-name heading and total-duty heading. Duty totals must be whole non-negative numbers. The same exact workbook file cannot be imported twice into the same workspace.
-
-The app looks different without internet access
-
-The app's core local functions do not require a hosted service. The Google Fonts IBM Plex Sans and IBM Plex Mono assets may not load, in which case the page uses fallback fonts. First-time package setup still needs downloads unless dependencies are already cached.
-
-History seems to have disappeared
-
-The local SQLite data is stored in data/exam_duty.db. Check whether the project folder changed, whether the database file was deleted, whether a different copy of the repository is being run, or whether a different username is signed in. Restore a backup if the database was removed.
-
-34. Additional interview review
-
-Question: Why separate the frontend and backend during development?
-
-Answer: The frontend focuses on interaction and presentation while the backend owns validation, scheduling, authentication, and persistence. The API boundary lets each side evolve independently, but it requires correct URLs and CORS configuration during local development.
-
-Question: What is the difference between a development server and a production server?
-
-Answer: A development server provides convenient source reloads and debugging. This project uses Vite and Uvicorn reload for local development. A production server uses built assets and stable process configuration without development reload behavior. Docker builds static frontend assets and uses a backend server process, but a production public deployment still requires additional hosting and security configuration.
-
-Question: What is a virtual environment?
-
-Answer: A virtual environment is an isolated Python package directory associated with a Python interpreter. Here it is backend/venv. It prevents this application's Python packages from being mixed with global packages or packages used by unrelated projects.
-
-Question: What is the difference between npm install and npm ci?
-
-Answer: npm ci installs exactly the dependency resolution recorded in package-lock.json and is suited to repeatable setup. npm install can update the lock file when package declarations change. The launcher uses npm ci.
-
-Question: What is the difference between an image, a container, and a volume?
-
-Answer: An image is a built package of application files and runtime dependencies. A container is a running instance of an image. A volume is separate persistent storage that can survive replacement of a container. In this project, the PostgreSQL container stores its database in a named volume.
-
-Question: Why can containers talk to the database using db?
-
-Answer: Docker Compose creates a private network and registers each service name in its internal name resolution. The app container can use the db service name. A process running directly on Windows generally cannot resolve that name.
-
-Question: What is a health check?
-
-Answer: A health check periodically tests whether a service is responsive. The Compose file checks PostgreSQL readiness and the app's /health endpoint. It helps startup ordering and monitoring but does not replace functional tests.
-
-Question: What is CORS preflight?
-
-Answer: Before certain cross-origin requests, a browser sends an OPTIONS request asking whether the API permits the origin, method, and headers. The backend CORS middleware answers according to CORS_ORIGINS and configured methods and headers.
-
-Question: What are status codes 401, 409, and 422 used for here?
-
-Answer: 401 means authentication is missing or invalid. 409 means a conflicting record exists, such as a duplicate username or exam history entry. 422 means request fields fail validation rules.
-
-Question: Why are names not primary keys for teachers?
-
-Answer: The current system uses teacher-name strings for input and history matching because it is simple for spreadsheet workflows. This means spelling changes can split a person's history. Stable teacher IDs would be a more robust design for a larger deployment.
-
-Question: Why is the duty algorithm called greedy?
-
-Answer: It picks the best available teacher for the current room based on the current totals, then proceeds to the next room. It does not revisit previous choices or evaluate every full schedule combination.
-
-Question: Why is SystemRandom used for ties?
-
-Answer: SystemRandom draws randomness from the operating system rather than using a repeatable seeded pseudo-random sequence. This avoids deterministic tie ordering in ordinary use. It also means tests should assert fairness invariants, not one exact schedule.
-
-Question: What is idempotency and how does history import approach it?
-
-Answer: An idempotent operation can be repeated without applying the same effect twice. The history import stores a hash of workbook bytes and rejects an exact repeat. A workbook with different bytes but equivalent rows is not considered identical by this hash check.
-
-Question: What is a database transaction?
-
-Answer: A transaction groups database changes so they can be committed together or rolled back on failure. Account registration and history operations use SQLAlchemy sessions and commits. A failure during multi-row history writes should be considered carefully to avoid partial updates.
-
-Question: Why are Python type annotations useful here?
-
-Answer: They document the intended values, help editor analysis, clarify function contracts, and support Pydantic and SQLAlchemy typed models. They do not by themselves validate every ordinary Python value at runtime.
-
-Question: What is the difference between authentication and authorization?
-
-Answer: Authentication checks who is making the request. Authorization checks whether that user may perform the requested operation. The app authenticates private endpoints using JWTs and scopes history queries by the authenticated user's school_id. The current role field is stored but role-based permission checks are not a major part of the current workflow.
-
-Question: What data should never be committed to Git?
-
-Answer: Real passwords, APP_SECRET_KEY values, database connection strings, .env files, local database contents, and private exports should not be committed. .gitignore excludes common local data files, but developers should still inspect git status and staged changes before committing.
-
-Question: If more users needed to access the app from different computers, what would have to change?
-
-Answer: The deployment would need a host reachable by those computers, a persistent shared database, TLS, a production-grade secret, backups, persistent rate-limit storage, access controls, and security review. The current local launcher is not that deployment.
-
-35. Short technical summary for interviews
-
-The project is a React and FastAPI full-stack scheduling application. React with Vite presents the schedule form and room-based chart. FastAPI validates JSON using Pydantic and exposes account, allocation, history, upload, and export endpoints. SQLAlchemy persists users and duty history in SQLite locally and PostgreSQL in Docker Compose. The allocation algorithm greedily chooses the available teacher with the lowest saved plus current duty total and randomly breaks equal-total ties. CSV is parsed in the browser; Excel is processed using openpyxl. DOCX files are generated with python-docx on the server and with the JavaScript docx package as a fallback. A Windows batch script automates local startup, while Docker and YAML configuration are optional container-based self-hosting tools.
+End of document
