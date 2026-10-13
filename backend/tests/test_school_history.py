@@ -16,6 +16,7 @@ from app.auth import (
     HistoryRecord,
     Registration,
     User,
+    decode_token,
     duty_history,
     import_duty_history,
     login,
@@ -59,7 +60,8 @@ class SchoolHistoryTests(unittest.TestCase):
             Credentials(username="NORTHSCHOOL", password="long-enough-test-password"),
             self.db,
         )
-        self.assertEqual(logged_in["access_token"], first_session["access_token"])
+        self.assertEqual(logged_in["username"], first_session["username"])
+        self.assertEqual(decode_token(logged_in["access_token"], "access"), str(first_user.id))
 
         record_completed_exam(HistoryRecord(
             exam_id="north-exam",

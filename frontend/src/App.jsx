@@ -4,7 +4,6 @@ import { ArrowDownToLine, CalendarDays, History, LogOut, Upload } from 'lucide-r
 import Navbar from './components/Navbar';
 import DataEntryForm from './components/DataEntryForm';
 import Dashboard from './components/Dashboard';
-import { exportDocxClientSide } from './utils/docxExporter';
 import { API_BASE_URL } from './utils/api';
 
 const TOKEN_KEY = 'exam-duty-access-token';
@@ -166,6 +165,7 @@ export default function App() {
       setTimeout(() => setExportSuccess(false), 4000);
     } catch {
       try {
+        const { exportDocxClientSide } = await import('./utils/docxExporter');
         await exportDocxClientSide(allocationData);
         setExportSuccess(true);
         setTimeout(() => setExportSuccess(false), 4000);
@@ -224,7 +224,7 @@ export default function App() {
         ) : mode === 'history' ? (
           <HistoryView history={history} busy={historyBusy} message={historyMessage} onImport={importHistory} onExport={downloadHistory} onBack={() => setMode('home')} />
         ) : mode === 'workspace' ? (
-          <DataEntryForm onSubmit={handleGenerateAllocation} loading={loading} />
+          <DataEntryForm onSubmit={handleGenerateAllocation} loading={loading} onCancel={() => setMode('home')} />
         ) : (
           <HomeScreen account={account} onChoose={setMode} onOpenHistory={openHistory} onLogout={handleLogout} />
         )}
@@ -273,7 +273,7 @@ function AccountPanel({ authMode, setAuthMode, username, setUsername, password, 
         <h1 className="mt-3 text-2xl font-semibold text-slate-900">{isRegistering ? 'Create your account' : 'Sign in to schedule'}</h1>
         <p className="mt-2 text-sm text-slate-600">Use a username and password. No email or verification step is needed. To share history, teammates use the same login.</p>
         <form onSubmit={onSubmit} className="mt-6 space-y-4">
-          <label className="block text-sm text-slate-700">Username<input required minLength={3} maxLength={32} pattern="[A-Za-z0-9_.-]+" autoComplete="username" className="glass-input mt-1 block w-full px-3 py-2" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
+          <label className="block text-sm text-slate-700">Username<input required minLength={3} maxLength={32} pattern="[A-Za-z0-9_.\-]+" autoComplete="username" className="glass-input mt-1 block w-full px-3 py-2" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
           <label className="block text-sm text-slate-700">Password<input required type="password" minLength={isRegistering ? 12 : 1} maxLength={256} autoComplete={isRegistering ? 'new-password' : 'current-password'} className="glass-input mt-1 block w-full px-3 py-2" value={password} onChange={(event) => setPassword(event.target.value)} />{isRegistering && <span className="mt-1 block text-xs text-slate-500">Use at least 12 characters.</span>}</label>
           <button className="w-full rounded-md bg-emerald-800 px-4 py-2.5 text-sm font-medium text-white">{isRegistering ? 'Create account' : 'Sign in'}</button>
         </form>

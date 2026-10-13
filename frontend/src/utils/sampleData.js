@@ -1,11 +1,11 @@
 export const SAMPLE_DATA = {
   school_name: "St. Xavier International School",
-  exam_name: "Mid-Term Examinations 2026",
+  exam_name: `Mid-Term Examinations ${new Date().getFullYear()}`,
   sessions: [
-    { id: "s1", date: "2026-10-12", time_slot: "09:00 AM - 12:00 PM", session_name: "Session 1 - Mathematics & Science" },
-    { id: "s2", date: "2026-10-12", time_slot: "01:30 PM - 04:30 PM", session_name: "Session 2 - English Literature" },
-    { id: "s3", date: "2026-10-13", time_slot: "09:00 AM - 12:00 PM", session_name: "Session 3 - Social Studies" },
-    { id: "s4", date: "2026-10-13", time_slot: "01:30 PM - 04:30 PM", session_name: "Session 4 - Computer Science" },
+    { id: "s1", dateOffset: 0, time_slot: "09:00 AM - 12:00 PM", session_name: "Session 1 - Mathematics & Science" },
+    { id: "s2", dateOffset: 0, time_slot: "01:30 PM - 04:30 PM", session_name: "Session 2 - English Literature" },
+    { id: "s3", dateOffset: 1, time_slot: "09:00 AM - 12:00 PM", session_name: "Session 3 - Social Studies" },
+    { id: "s4", dateOffset: 1, time_slot: "01:30 PM - 04:30 PM", session_name: "Session 4 - Computer Science" },
   ],
   teachersText: `Dr. Robert Ford
 Prof. Eleanor Vance

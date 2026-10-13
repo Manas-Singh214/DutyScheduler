@@ -1,14 +1,23 @@
 import React, { useState } from 'react';
 import { SAMPLE_DATA } from '../utils/sampleData';
 import { getSpreadsheetColumnValues, readListSpreadsheet } from '../utils/spreadsheetImport';
-import { Plus, Trash2, Sparkles, Send, Users, Building, Calendar, BookOpen, Upload } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Sparkles, Send, Users, Building, Calendar, BookOpen, Upload } from 'lucide-react';
 
-export default function DataEntryForm({ onSubmit, loading }) {
+function dateOffsetFromToday(offset) {
+  const date = new Date();
+  date.setDate(date.getDate() + offset);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export default function DataEntryForm({ onSubmit, loading, onCancel }) {
   const [schoolName, setSchoolName] = useState('');
   const [examName, setExamName] = useState('');
   const [sessions, setSessions] = useState([
-    { id: '1', date: '2026-10-12', time_slot: '09:00 AM - 12:00 PM', session_name: 'Morning Session' },
-    { id: '2', date: '2026-10-12', time_slot: '01:30 PM - 04:30 PM', session_name: 'Afternoon Session' },
+    { id: '1', date: dateOffsetFromToday(0), time_slot: '09:00 AM - 12:00 PM', session_name: 'Morning Session' },
+    { id: '2', date: dateOffsetFromToday(0), time_slot: '01:30 PM - 04:30 PM', session_name: 'Afternoon Session' },
   ]);
   const [teachersText, setTeachersText] = useState('');
   const [roomsText, setRoomsText] = useState('');
@@ -19,7 +28,10 @@ export default function DataEntryForm({ onSubmit, loading }) {
   const loadDemoData = () => {
     setSchoolName(SAMPLE_DATA.school_name);
     setExamName(SAMPLE_DATA.exam_name);
-    setSessions(SAMPLE_DATA.sessions);
+    setSessions(SAMPLE_DATA.sessions.map(({ dateOffset, ...session }) => ({
+      ...session,
+      date: dateOffsetFromToday(dateOffset),
+    })));
     setTeachersText(SAMPLE_DATA.teachersText);
     setRoomsText(SAMPLE_DATA.roomsText);
   };
@@ -28,7 +40,7 @@ export default function DataEntryForm({ onSubmit, loading }) {
     const newId = String(Date.now());
     setSessions([
       ...sessions,
-      { id: newId, date: '2026-10-13', time_slot: '09:00 AM - 12:00 PM', session_name: `Session ${sessions.length + 1}` }
+      { id: newId, date: dateOffsetFromToday(1), time_slot: '09:00 AM - 12:00 PM', session_name: `Session ${sessions.length + 1}` }
     ]);
   };
 
@@ -136,14 +148,24 @@ export default function DataEntryForm({ onSubmit, loading }) {
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={loadDemoData}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-semibold transition shadow-lg shadow-indigo-500/10"
-        >
-          <Sparkles className="h-4 w-4 text-indigo-400" />
-          Load Demo Data
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to home
+          </button>
+          <button
+            type="button"
+            onClick={loadDemoData}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-semibold transition shadow-lg shadow-indigo-500/10"
+          >
+            <Sparkles className="h-4 w-4 text-indigo-400" />
+            Load Demo Data
+          </button>
+        </div>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-6">
@@ -194,7 +216,7 @@ export default function DataEntryForm({ onSubmit, loading }) {
           </div>
 
           <div className="space-y-3">
-            {sessions.map((session, index) => (
+            {sessions.map((session) => (
               <div key={session.id} className="grid grid-cols-1 md:grid-cols-12 gap-3 p-3 rounded-xl bg-slate-950/40 border border-slate-800/80 items-center">
                 <div className="md:col-span-4">
                   <label className="block text-[10px] uppercase text-slate-400 font-medium mb-1">Session Label</label>
